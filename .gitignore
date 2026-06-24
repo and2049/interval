@@ -1,0 +1,10 @@
+target/
+node_modules/
+dist/
+.env
+*.db
+*.db-shm
+*.db-wal
+frontend/.vite/
+backend/interval.db
+tmp/
