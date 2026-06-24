@@ -39,6 +39,7 @@ pub struct TrackPoint {
 #[serde(rename_all = "snake_case")]
 pub enum TrackGeometrySource {
     OpenF1Location,
+    CuratedStatic,
     Schematic,
 }
 

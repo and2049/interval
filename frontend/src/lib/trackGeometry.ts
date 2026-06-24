@@ -28,3 +28,43 @@ export const pointsToPath = (points: TrackPoint[], bounds: TrackBounds) =>
       return `${index === 0 ? "M" : "L"} ${scaled.x.toFixed(2)} ${scaled.y.toFixed(2)}`;
     })
     .join(" ");
+
+export const closedRoadPath = (
+  outerEdge: TrackPoint[],
+  innerEdge: TrackPoint[],
+  bounds: TrackBounds
+) => {
+  if (!hasUsableGeometry(outerEdge) || !hasUsableGeometry(innerEdge)) return "";
+  const outer = outerEdge
+    .map((point, index) => {
+      const scaled = scalePoint(point, bounds);
+      return `${index === 0 ? "M" : "L"} ${scaled.x.toFixed(2)} ${scaled.y.toFixed(2)}`;
+    })
+    .join(" ");
+  const inner = [...innerEdge]
+    .reverse()
+    .map((point) => {
+      const scaled = scalePoint(point, bounds);
+      return `L ${scaled.x.toFixed(2)} ${scaled.y.toFixed(2)}`;
+    })
+    .join(" ");
+  return `${outer} ${inner} Z`;
+};
+
+export const pointAtRelativeDistance = (points: TrackPoint[], relativeDistance: number) => {
+  if (!hasUsableGeometry(points)) return undefined;
+  const relative = ((relativeDistance % 1) + 1) % 1;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const current = points[index];
+    const next = points[index + 1];
+    if (relative >= current.relative_distance && relative <= next.relative_distance) {
+      const span = Math.max(0.000001, next.relative_distance - current.relative_distance);
+      const ratio = Math.max(0, Math.min(1, (relative - current.relative_distance) / span));
+      return {
+        x: current.x + (next.x - current.x) * ratio,
+        y: current.y + (next.y - current.y) * ratio
+      };
+    }
+  }
+  return points[0];
+};

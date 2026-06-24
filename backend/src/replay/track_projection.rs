@@ -22,7 +22,8 @@ pub fn build_track_geometry(session_key: i64, locations: &[LocationRecord]) -> T
         .max_by_key(|(_, count)| *count)
         .map(|(driver_number, _)| driver_number)
     else {
-        return schematic_geometry(session_key);
+        return crate::replay::curated_geometry(session_key)
+            .unwrap_or_else(|| schematic_geometry(session_key));
     };
 
     let mut samples = locations
@@ -34,7 +35,8 @@ pub fn build_track_geometry(session_key: i64, locations: &[LocationRecord]) -> T
 
     let mut points = simplify_samples(&samples);
     if points.len() < MIN_GEOMETRY_POINTS {
-        return schematic_geometry(session_key);
+        return crate::replay::curated_geometry(session_key)
+            .unwrap_or_else(|| schematic_geometry(session_key));
     }
     apply_distances(&mut points);
     let bounds = bounds_for(&points);
@@ -122,6 +124,24 @@ pub fn position_from_location(
     }
 }
 
+pub fn projected_position(
+    geometry: &TrackGeometry,
+    driver_number: i32,
+    relative_distance: f64,
+) -> Option<TrackPositionSample> {
+    let point = point_at_relative_distance(geometry, relative_distance)?;
+    Some(TrackPositionSample {
+        driver_number,
+        x: point.x,
+        y: point.y,
+        z: point.z,
+        relative_distance: Some(relative_distance.rem_euclid(1.0)),
+        source: TrackPositionSource::Projected,
+        quality: TrackPositionQuality::Projected,
+        stale_seconds: None,
+    })
+}
+
 pub fn schematic_position(driver_number: i32, field_position: i32, t: f64) -> TrackPositionSample {
     let field_position = field_position.max(1) as f64;
     let relative_distance = ((t / 105.0) + (field_position / 20.0)) % 1.0;
@@ -136,6 +156,37 @@ pub fn schematic_position(driver_number: i32, field_position: i32, t: f64) -> Tr
         quality: TrackPositionQuality::Schematic,
         stale_seconds: None,
     }
+}
+
+fn point_at_relative_distance(
+    geometry: &TrackGeometry,
+    relative_distance: f64,
+) -> Option<TrackPoint> {
+    if geometry.centerline.len() < 2 {
+        return None;
+    }
+    let relative_distance = relative_distance.rem_euclid(1.0);
+    let target = relative_distance * geometry.circuit_length?;
+    for pair in geometry.centerline.windows(2) {
+        let a = &pair[0];
+        let b = &pair[1];
+        if target >= a.cumulative_distance && target <= b.cumulative_distance {
+            let span = (b.cumulative_distance - a.cumulative_distance).max(f64::EPSILON);
+            let ratio = ((target - a.cumulative_distance) / span).clamp(0.0, 1.0);
+            return Some(TrackPoint {
+                x: a.x + (b.x - a.x) * ratio,
+                y: a.y + (b.y - a.y) * ratio,
+                z: match (a.z, b.z) {
+                    (Some(az), Some(bz)) => Some(az + (bz - az) * ratio),
+                    (Some(z), None) | (None, Some(z)) => Some(z),
+                    (None, None) => None,
+                },
+                cumulative_distance: target,
+                relative_distance,
+            });
+        }
+    }
+    geometry.centerline.first().cloned()
 }
 
 fn simplify_samples(samples: &[LocationRecord]) -> Vec<TrackPoint> {
@@ -303,6 +354,31 @@ mod tests {
     }
 
     #[test]
+    fn uses_curated_bahrain_geometry_when_location_is_missing() {
+        let geometry = build_track_geometry(crate::replay::BAHRAIN_SESSION_KEY, &[]);
+        assert_eq!(geometry.source, TrackGeometrySource::CuratedStatic);
+        assert_eq!(geometry.quality, TrackGeometryQuality::Ready);
+        assert_eq!(geometry.map_mode, MapMode::Projected);
+    }
+
+    #[test]
+    fn prefers_openf1_geometry_when_location_samples_are_usable() {
+        let samples = (0..20)
+            .map(|idx| LocationRecord {
+                t: idx as f64,
+                driver_number: 1,
+                x: idx as f64 * 10.0,
+                y: (idx % 3) as f64,
+                z: None,
+            })
+            .collect::<Vec<_>>();
+
+        let geometry = build_track_geometry(crate::replay::BAHRAIN_SESSION_KEY, &samples);
+        assert_eq!(geometry.source, TrackGeometrySource::OpenF1Location);
+        assert_eq!(geometry.map_mode, MapMode::Gps);
+    }
+
+    #[test]
     fn interpolates_between_driver_samples() {
         let samples = vec![
             LocationRecord {
@@ -340,5 +416,16 @@ mod tests {
         let geometry = build_track_geometry(42, &samples);
         let relative = project_relative_distance(&geometry, 95.0, 2.0).unwrap();
         assert!(relative > 0.45 && relative < 0.55);
+    }
+
+    #[test]
+    fn projected_position_uses_centerline_coordinates() {
+        let geometry = build_track_geometry(crate::replay::BAHRAIN_SESSION_KEY, &[]);
+        let position = projected_position(&geometry, 1, 0.25).unwrap();
+        assert_eq!(position.source, TrackPositionSource::Projected);
+        assert_eq!(position.quality, TrackPositionQuality::Projected);
+        assert_eq!(position.relative_distance, Some(0.25));
+        assert!(position.x >= geometry.bounds.min_x && position.x <= geometry.bounds.max_x);
+        assert!(position.y >= geometry.bounds.min_y && position.y <= geometry.bounds.max_y);
     }
 }

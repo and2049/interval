@@ -1,6 +1,12 @@
 import { For } from "solid-js";
 import type { ReplaySnapshot, TrackGeometry } from "../../../shared/types/api";
-import { hasUsableGeometry, pointsToPath, scalePoint } from "../lib/trackGeometry";
+import {
+  closedRoadPath,
+  hasUsableGeometry,
+  pointAtRelativeDistance,
+  pointsToPath,
+  scalePoint
+} from "../lib/trackGeometry";
 import { Panel } from "./Panel";
 
 export function TrackMap(props: { snapshot: ReplaySnapshot; geometry?: TrackGeometry }) {
@@ -8,7 +14,8 @@ export function TrackMap(props: { snapshot: ReplaySnapshot; geometry?: TrackGeom
     props.snapshot.timing.rows.find((row) => row.driver.driver_number === number)?.driver;
   const realGeometry = () =>
     props.geometry?.quality === "ready" && hasUsableGeometry(props.geometry.centerline);
-  const displayMode = () => (realGeometry() ? "GPS" : "SCHEMATIC");
+  const displayMode = () => props.snapshot.track.map_mode.toUpperCase();
+  const leaderNumber = () => props.snapshot.timing.rows[0]?.driver.driver_number;
   const positionPoint = (position: { x: number; y: number }) =>
     realGeometry() && props.geometry
       ? scalePoint(position, props.geometry.bounds)
@@ -17,9 +24,14 @@ export function TrackMap(props: { snapshot: ReplaySnapshot; geometry?: TrackGeom
   return (
     <Panel title="Track Map" class="h-full">
       <div class="track-map relative h-[31rem] overflow-hidden">
-        <svg class="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <svg class="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">
           {realGeometry() && props.geometry ? (
             <>
+              <path
+                d={closedRoadPath(props.geometry.outer_edge, props.geometry.inner_edge, props.geometry.bounds)}
+                fill="#20262c"
+                stroke="none"
+              />
               <path
                 d={pointsToPath(props.geometry.outer_edge, props.geometry.bounds)}
                 fill="none"
@@ -41,17 +53,49 @@ export function TrackMap(props: { snapshot: ReplaySnapshot; geometry?: TrackGeom
               />
               {(() => {
                 const start = scalePoint(props.geometry.centerline[0], props.geometry.bounds);
+                const inner = scalePoint(props.geometry.inner_edge[0], props.geometry.bounds);
+                const outer = scalePoint(props.geometry.outer_edge[0], props.geometry.bounds);
                 return (
-                  <line
-                    x1={start.x - 2}
-                    y1={start.y}
-                    x2={start.x + 2}
-                    y2={start.y}
-                    stroke="#f7fbff"
-                    stroke-width="0.8"
-                  />
+                  <>
+                    <line
+                      x1={inner.x}
+                      y1={inner.y}
+                      x2={outer.x}
+                      y2={outer.y}
+                      stroke="#f7fbff"
+                      stroke-width="0.8"
+                    />
+                    <text
+                      x={start.x + 1.2}
+                      y={start.y - 1.2}
+                      fill="#9aa4af"
+                      font-size="2.4"
+                      font-family="monospace"
+                    >
+                      S/F
+                    </text>
+                  </>
                 );
               })()}
+              <For each={distanceMarkers(props.geometry)}>
+                {(marker) => {
+                  const point = scalePoint(marker.point, props.geometry!.bounds);
+                  return (
+                    <g>
+                      <circle cx={point.x} cy={point.y} r="0.45" fill="#7b8794" />
+                      <text
+                        x={point.x + 1}
+                        y={point.y - 1}
+                        fill="#7b8794"
+                        font-size="2.1"
+                        font-family="monospace"
+                      >
+                        {marker.label}
+                      </text>
+                    </g>
+                  );
+                }}
+              </For>
             </>
           ) : (
             <>
@@ -73,12 +117,14 @@ export function TrackMap(props: { snapshot: ReplaySnapshot; geometry?: TrackGeom
             {(position) => {
               const driver = driverByNumber(position.driver_number);
               const point = positionPoint(position);
+              const isLeader = position.driver_number === leaderNumber();
               return (
                 <g>
+                  <ShowLeaderHalo show={isLeader} x={point.x} y={point.y} />
                   <circle
                     cx={point.x}
                     cy={point.y}
-                    r="2.3"
+                    r={isLeader ? "2.8" : "2.3"}
                     fill={driver ? `#${driver.team_colour}` : "#2cf5bf"}
                     stroke="#f7fbff"
                     stroke-width="0.5"
@@ -100,9 +146,39 @@ export function TrackMap(props: { snapshot: ReplaySnapshot; geometry?: TrackGeom
         <div class="absolute left-3 top-3 grid grid-cols-3 gap-1 font-mono text-[0.68rem]">
           <span class="border border-line bg-panel px-2 py-1">L{props.snapshot.race_state.lap}</span>
           <span class="border border-line bg-panel px-2 py-1 uppercase">{props.snapshot.race_state.track_status}</span>
-          <span class="border border-line bg-panel px-2 py-1">{displayMode()}</span>
+          <span class={`border bg-panel px-2 py-1 ${modeClass(props.snapshot.track.map_mode)}`}>{displayMode()}</span>
         </div>
       </div>
     </Panel>
   );
+}
+
+function ShowLeaderHalo(props: { show: boolean; x: number; y: number }) {
+  return props.show ? (
+    <circle cx={props.x} cy={props.y} r="4.2" fill="none" stroke="#f5d547" stroke-width="0.55" />
+  ) : null;
+}
+
+function distanceMarkers(geometry: TrackGeometry) {
+  const length = geometry.circuit_length ?? 0;
+  if (length <= 0) return [];
+  const markers = [];
+  const count = Math.min(6, Math.floor(length / 1000));
+  for (let index = 1; index <= count; index += 1) {
+    const relative = (index * 1000) / length;
+    const point = pointAtRelativeDistance(geometry.centerline, relative);
+    if (point) markers.push({ label: `${index}K`, point });
+  }
+  return markers;
+}
+
+function modeClass(mode: ReplaySnapshot["track"]["map_mode"]) {
+  switch (mode) {
+    case "gps":
+      return "border-mint text-mint";
+    case "projected":
+      return "border-amber text-amber";
+    default:
+      return "border-line text-slate-400";
+  }
 }

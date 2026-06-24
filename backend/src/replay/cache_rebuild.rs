@@ -78,8 +78,11 @@ fn coverage_warnings(
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     if !channels.location {
-        warnings
-            .push("location channel missing; track map will use schematic fallback".to_string());
+        warnings.push(if channels.track_geometry {
+            "location channel missing; track map will use projected curated geometry".to_string()
+        } else {
+            "location channel missing; track map will use schematic fallback".to_string()
+        });
     }
     if !channels.weather {
         warnings.push("weather channel missing".to_string());

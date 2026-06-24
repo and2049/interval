@@ -95,7 +95,7 @@ Returns session metadata, replay duration, frame bounds, drivers, data sources, 
   },
   "track_geometry": {
     "status": "ready",
-    "source": "open_f1_location",
+    "source": "curated_static",
     "quality": "ready"
   }
 }
@@ -122,7 +122,7 @@ Returns the deterministic replay snapshot at or immediately before `t`. Requests
     ]
   },
   "track": {
-    "map_mode": "gps",
+    "map_mode": "projected",
     "quality": "ready",
     "positions": [
       {
@@ -130,8 +130,8 @@ Returns the deterministic replay snapshot at or immediately before `t`. Requests
         "x": 123.0,
         "y": 456.0,
         "relative_distance": 0.42,
-        "source": "interpolated",
-        "quality": "interpolated"
+        "source": "projected",
+        "quality": "projected"
       }
     ]
   }
@@ -172,10 +172,12 @@ Returns static track geometry for the selected session.
 {
   "contract_version": "replay.v1",
   "session_key": 9472,
-  "source": "open_f1_location",
+  "source": "curated_static",
   "quality": "ready",
-  "map_mode": "gps",
+  "map_mode": "projected",
   "bounds": { "min_x": 0.0, "max_x": 100.0, "min_y": 0.0, "max_y": 100.0 },
   "centerline": []
 }
 ```
+
+For the MVP Bahrain fixture, OpenF1 `location` remains preferred when it is available. If it is missing, the backend uses curated static Bahrain geometry and projects driver dots onto the centerline for visual placement. Timing order remains based on OpenF1 `position`/`intervals`, not map projection.

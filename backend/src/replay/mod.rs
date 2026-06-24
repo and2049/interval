@@ -1,4 +1,5 @@
 mod cache_rebuild;
+mod curated_tracks;
 mod generator;
 pub mod track_projection;
 
@@ -6,6 +7,7 @@ use crate::domain::{ReplayMetadata, ReplaySnapshot};
 use sqlx::SqlitePool;
 
 pub use cache_rebuild::{rebuild_from_cache, CachedReplayBuild};
+pub use curated_tracks::{curated_geometry, BAHRAIN_SESSION_KEY};
 pub use generator::generate_replay;
 
 pub async fn metadata(pool: &SqlitePool, session_key: i64) -> sqlx::Result<Option<ReplayMetadata>> {

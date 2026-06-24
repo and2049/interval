@@ -4,8 +4,8 @@ use crate::{
         EventKind, EventSeverity, EventSource, MapMode, RaceControlMessage, RaceControlSection,
         RaceState, RankSource, ReplayCursor, ReplayEvent, ReplayMetadata, ReplaySnapshot,
         ReplayWeatherSection, Sector, SectorStatus, Session, Stint, TimingSection, TrackGeometry,
-        TrackGeometryQuality, TrackGeometrySummary, TrackPositionSample, TrackSection,
-        TyreCompound, WeatherSample, REPLAY_CONTRACT_VERSION,
+        TrackGeometryQuality, TrackGeometrySource, TrackGeometrySummary, TrackPositionSample,
+        TrackSection, TyreCompound, WeatherSample, REPLAY_CONTRACT_VERSION,
     },
     normalization::{IntervalRecord, LapRecord, PitEvent, PositionRecord, RaceData, SessionResult},
 };
@@ -172,9 +172,13 @@ fn replay_events(data: &RaceData) -> Vec<ReplayEvent> {
 }
 
 fn map_mode(geometry: &TrackGeometry) -> MapMode {
-    match geometry.quality {
-        TrackGeometryQuality::Ready => MapMode::Gps,
-        TrackGeometryQuality::Schematic | TrackGeometryQuality::Missing => MapMode::Schematic,
+    match (&geometry.quality, &geometry.source) {
+        (TrackGeometryQuality::Ready, TrackGeometrySource::OpenF1Location) => MapMode::Gps,
+        (TrackGeometryQuality::Ready, TrackGeometrySource::CuratedStatic) => MapMode::Projected,
+        (TrackGeometryQuality::Ready, TrackGeometrySource::Schematic)
+        | (TrackGeometryQuality::Schematic | TrackGeometryQuality::Missing, _) => {
+            MapMode::Schematic
+        }
     }
 }
 
@@ -364,29 +368,55 @@ fn latest_intervals(intervals: &[IntervalRecord], t: f64) -> HashMap<i32, &Inter
 
 fn latest_positions(data: &RaceData, geometry: &TrackGeometry, t: f64) -> Vec<TrackPositionSample> {
     let ranks = latest_rank_records(&data.positions, t);
+    let laps = latest_laps(&data.laps, t);
     data.drivers
         .iter()
         .map(|driver| {
             let rank = ranks
                 .get(&driver.driver_number)
                 .map_or(driver.driver_number, |record| record.position);
-            let Some(location) = crate::replay::track_projection::interpolate_driver_location(
+            if let Some(location) = crate::replay::track_projection::interpolate_driver_location(
                 &data.locations,
                 driver.driver_number,
                 t,
-            ) else {
-                return crate::replay::track_projection::schematic_position(
-                    driver.driver_number,
-                    rank,
-                    t,
+            ) {
+                let exact = data.locations.iter().any(|sample| {
+                    sample.driver_number == driver.driver_number && (sample.t - t).abs() < 0.001
+                });
+                return crate::replay::track_projection::position_from_location(
+                    geometry, location, !exact,
                 );
-            };
-            let exact = data.locations.iter().any(|sample| {
-                sample.driver_number == driver.driver_number && (sample.t - t).abs() < 0.001
-            });
-            crate::replay::track_projection::position_from_location(geometry, location, !exact)
+            }
+
+            if geometry.quality == TrackGeometryQuality::Ready {
+                let relative_distance =
+                    projected_relative_distance(laps.get(&driver.driver_number).copied(), rank, t);
+                if let Some(position) = crate::replay::track_projection::projected_position(
+                    geometry,
+                    driver.driver_number,
+                    relative_distance,
+                ) {
+                    return position;
+                }
+            }
+
+            crate::replay::track_projection::schematic_position(driver.driver_number, rank, t)
         })
         .collect()
+}
+
+fn projected_relative_distance(lap: Option<&LapRecord>, rank: i32, t: f64) -> f64 {
+    let rank_offset = (rank.max(1) - 1) as f64 * 0.006;
+    let progress = lap
+        .and_then(|lap| {
+            let duration = lap.lap.lap_duration?;
+            if duration <= 0.0 {
+                return None;
+            }
+            Some(((t - lap.t_start) / duration).clamp(0.0, 0.995))
+        })
+        .unwrap_or_else(|| (t / 95.0).rem_euclid(1.0));
+    (progress - rank_offset).rem_euclid(1.0)
 }
 
 fn latest_rank_records(positions: &[PositionRecord], t: f64) -> HashMap<i32, &PositionRecord> {
@@ -549,5 +579,77 @@ mod tests {
         assert_eq!(generated.metadata.session.total_laps, 1);
         assert!(generated.snapshots.len() > 1);
         assert_eq!(generated.snapshots[1].drivers[0].driver.code, "NOR");
+    }
+
+    #[test]
+    fn bahrain_without_location_uses_projected_track_positions() {
+        let session = Session {
+            session_key: crate::replay::BAHRAIN_SESSION_KEY,
+            meeting_key: 1229,
+            year: 2024,
+            name: "Race".to_string(),
+            session_type: crate::domain::SessionType::Race,
+            start_time: "2024-03-02T15:00:00Z".to_string(),
+            end_time: "2024-03-02T17:00:00Z".to_string(),
+            total_laps: 57,
+        };
+        let driver = Driver {
+            driver_number: 1,
+            code: "VER".to_string(),
+            full_name: "Max Verstappen".to_string(),
+            team_name: "Red Bull Racing".to_string(),
+            team_colour: "3671C6".to_string(),
+        };
+        let data = RaceData {
+            drivers: vec![driver],
+            laps: vec![LapRecord {
+                t_start: 0.0,
+                lap: crate::domain::Lap {
+                    driver_number: 1,
+                    lap_number: 1,
+                    lap_duration: Some(90.0),
+                    sector_1: None,
+                    sector_2: None,
+                    sector_3: None,
+                    is_pit_out_lap: false,
+                },
+            }],
+            intervals: vec![],
+            positions: vec![PositionRecord {
+                t: 0.0,
+                position: 1,
+                sample: TrackPositionSample {
+                    driver_number: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    z: None,
+                    relative_distance: None,
+                    source: crate::domain::TrackPositionSource::Schematic,
+                    quality: crate::domain::TrackPositionQuality::Missing,
+                    stale_seconds: None,
+                },
+            }],
+            locations: vec![],
+            pits: vec![],
+            race_control: vec![],
+            stints: vec![],
+            weather: vec![],
+            session_results: vec![],
+        };
+
+        let generated = generate_replay(session, data).unwrap();
+        assert_eq!(
+            generated.track_geometry.source,
+            TrackGeometrySource::CuratedStatic
+        );
+        assert_eq!(
+            generated.metadata.track_geometry.status,
+            TrackGeometryQuality::Ready
+        );
+        assert_eq!(generated.snapshots[1].track.map_mode, MapMode::Projected);
+        assert_eq!(
+            generated.snapshots[1].track.positions[0].source,
+            crate::domain::TrackPositionSource::Projected
+        );
     }
 }
