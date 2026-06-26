@@ -1,4 +1,4 @@
-use interval_backend::{api, connectors::openf1_historical::HistoricalClient, storage};
+use interval_backend::{api, connectors::openf1_historical::HistoricalClient, startup, storage};
 use std::net::SocketAddr;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
@@ -17,6 +17,7 @@ async fn main() -> anyhow::Result<()> {
     storage::migrate(&pool).await?;
     storage::seed_demo_session(&pool).await?;
     storage::seed_mvp_fixture(&pool).await?;
+    startup::rebuild_cached_replay_on_start(&pool).await?;
 
     let state = api::AppState::new(pool, HistoricalClient::default());
     let app = api::router(state)
@@ -30,10 +31,21 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("interval backend listening on http://{addr}");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => tracing::info!("shutdown signal received"),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "ctrl-c handler unavailable; continuing until process termination"
+            );
+            std::future::pending::<()>().await;
+        }
+    }
 }

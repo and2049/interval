@@ -16,15 +16,9 @@ pub async fn seed_demo_session(pool: &SqlitePool) -> anyhow::Result<()> {
         .bind(DEMO_SESSION_KEY)
         .fetch_one(pool)
         .await?;
+    let session = demo_session();
     if existing > 0 {
-        let session = demo_session();
-        let drivers = demo_drivers();
-        let metadata = demo_metadata(&session, &drivers);
-        let snapshots = demo_snapshots(session.session_key, drivers);
-        let events = demo_replay_events();
-        super::replace_replay(pool, &metadata, &snapshots, &events).await?;
-        super::replace_track_geometry(pool, &demo_track_geometry(session.session_key)).await?;
-        super::set_ingest_status(pool, session.session_key, IngestStatus::Ready, None).await?;
+        replace_demo_replay(pool, &session).await?;
         return Ok(());
     }
 
@@ -35,11 +29,15 @@ pub async fn seed_demo_session(pool: &SqlitePool) -> anyhow::Result<()> {
         country: "United Arab Emirates".to_string(),
         location: "Yas Island".to_string(),
     };
-    let session = demo_session();
 
     super::upsert_meetings(pool, &[meeting]).await?;
     super::upsert_sessions(pool, std::slice::from_ref(&session)).await?;
+    replace_demo_replay(pool, &session).await?;
 
+    Ok(())
+}
+
+async fn replace_demo_replay(pool: &SqlitePool, session: &Session) -> anyhow::Result<()> {
     let drivers = demo_drivers();
     let metadata = demo_metadata(&session, &drivers);
     let snapshots = demo_snapshots(session.session_key, drivers);
@@ -47,7 +45,6 @@ pub async fn seed_demo_session(pool: &SqlitePool) -> anyhow::Result<()> {
     super::replace_replay(pool, &metadata, &snapshots, &events).await?;
     super::replace_track_geometry(pool, &demo_track_geometry(session.session_key)).await?;
     super::set_ingest_status(pool, session.session_key, IngestStatus::Ready, None).await?;
-
     Ok(())
 }
 
@@ -68,6 +65,13 @@ fn demo_metadata(session: &Session, drivers: &[Driver]) -> ReplayMetadata {
     ReplayMetadata {
         contract_version: REPLAY_CONTRACT_VERSION.to_string(),
         session: session.clone(),
+        meeting: Some(Meeting {
+            meeting_key: 1276,
+            year: 2025,
+            name: "Abu Dhabi Grand Prix".to_string(),
+            country: "United Arab Emirates".to_string(),
+            location: "Yas Island".to_string(),
+        }),
         duration_seconds: 180.0,
         frame_step_seconds: 60.0,
         total_frames: 4,
@@ -100,7 +104,6 @@ fn demo_metadata(session: &Session, drivers: &[Driver]) -> ReplayMetadata {
             events_endpoint: "/api/sessions/9839/replay/events".to_string(),
             track_geometry_endpoint: "/api/sessions/9839/track/geometry".to_string(),
         },
-        track_geometry_status: "schematic".to_string(),
     }
 }
 
@@ -218,10 +221,6 @@ fn demo_snapshots(session_key: i64, drivers: Vec<Driver>) -> Vec<ReplaySnapshot>
                     quality: DataQuality::Ready,
                 },
                 derived_metrics: derived_metrics.clone(),
-                lap,
-                track_status,
-                drivers: driver_rows,
-                positions,
             }
         })
         .collect()

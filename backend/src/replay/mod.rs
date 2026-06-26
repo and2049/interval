@@ -1,6 +1,16 @@
 mod cache_rebuild;
 mod curated_tracks;
+mod derived_events;
+mod events;
 mod generator;
+mod ingest_summary;
+mod metadata_builder;
+mod snapshot_builder;
+pub mod streaming;
+mod timing;
+mod track_geometry_builder;
+mod track_geometry_math;
+mod track_positions;
 pub mod track_projection;
 
 use crate::domain::{ReplayMetadata, ReplaySnapshot};
@@ -100,10 +110,17 @@ mod tests {
             .unwrap();
         assert!(build.generated_snapshots > 1);
         assert!(build.available_channels.timing);
-        assert!(metadata(&pool, session.session_key)
+        let metadata = metadata(&pool, session.session_key)
             .await
             .unwrap()
-            .is_some());
+            .expect("metadata should be stored after cached rebuild");
+        assert_eq!(
+            metadata
+                .meeting
+                .as_ref()
+                .map(|meeting| meeting.name.as_str()),
+            Some("Test Grand Prix")
+        );
         assert!(snapshot_at(&pool, session.session_key, 10.0)
             .await
             .unwrap()

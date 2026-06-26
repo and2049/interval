@@ -24,10 +24,12 @@ pub async fn rebuild_from_cache(
         anyhow::bail!("no cached raw OpenF1 data for session {session_key}");
     }
 
-    let coverage = endpoint_coverage(&bundle);
+    let coverage = super::ingest_summary::endpoint_coverage(&bundle);
     let race_data = normalization::race_data_from_bundle(&bundle, &session)?;
-    let generated = replay::generate_replay(session, race_data)?;
-    let warnings = coverage_warnings(&coverage, &generated.metadata.available_channels);
+    let mut generated = replay::generate_replay(session, race_data)?;
+    generated.metadata.meeting = storage::get_meeting(pool, generated.session.meeting_key).await?;
+    let warnings =
+        super::ingest_summary::coverage_warnings(&coverage, &generated.metadata.available_channels);
     let track_geometry = IngestTrackGeometrySummary {
         status: generated.track_geometry.quality.clone(),
         source: generated.track_geometry.source.clone(),
@@ -53,53 +55,4 @@ pub async fn rebuild_from_cache(
         available_channels,
         warnings,
     })
-}
-
-fn endpoint_coverage(
-    bundle: &[crate::connectors::openf1_historical::RawEndpoint],
-) -> Vec<EndpointCoverage> {
-    bundle
-        .iter()
-        .map(|entry| EndpointCoverage {
-            endpoint: entry.endpoint.clone(),
-            present: rows_in_payload(&entry.payload).is_some_and(|rows| rows > 0),
-            rows: rows_in_payload(&entry.payload),
-        })
-        .collect()
-}
-
-fn rows_in_payload(payload: &serde_json::Value) -> Option<usize> {
-    payload.as_array().map(Vec::len)
-}
-
-fn coverage_warnings(
-    coverage: &[EndpointCoverage],
-    channels: &crate::domain::AvailableChannels,
-) -> Vec<String> {
-    let mut warnings = Vec::new();
-    if !channels.location {
-        warnings.push(if channels.track_geometry {
-            "location channel missing; track map will use projected curated geometry".to_string()
-        } else {
-            "location channel missing; track map will use schematic fallback".to_string()
-        });
-    }
-    if !channels.weather {
-        warnings.push("weather channel missing".to_string());
-    }
-    if !channels.race_control {
-        warnings.push("race-control channel missing".to_string());
-    }
-    if !channels.intervals {
-        warnings.push("interval channel missing; timing gaps may be incomplete".to_string());
-    }
-    for endpoint in coverage.iter().filter(|endpoint| !endpoint.present) {
-        warnings.push(format!(
-            "OpenF1 endpoint '{}' returned no rows",
-            endpoint.endpoint
-        ));
-    }
-    warnings.sort();
-    warnings.dedup();
-    warnings
 }

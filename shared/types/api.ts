@@ -56,7 +56,7 @@ export interface SessionReadiness {
   ingest_status: IngestStatus;
   replay_ready: boolean;
   is_demo: boolean;
-  last_error?: string | null;
+  last_error: string | null;
 }
 
 export interface Driver {
@@ -142,6 +142,7 @@ export interface ReplayCursor {
 export interface ReplayMetadata {
   contract_version: "replay.v1" | string;
   session: Session;
+  meeting?: Meeting | null;
   duration_seconds: number;
   frame_step_seconds: number;
   total_frames: number;
@@ -153,7 +154,6 @@ export interface ReplayMetadata {
   available_channels: AvailableChannels;
   track_geometry: TrackGeometrySummary;
   endpoints: EndpointLinks;
-  track_geometry_status: "ready" | "schematic" | "missing" | string;
 }
 
 export interface DataSource {
@@ -243,11 +243,6 @@ export interface ReplaySnapshot {
   weather: ReplayWeatherSection;
   race_control: RaceControlSection;
   derived_metrics: DerivedMetric[];
-  // Compatibility fields for the current transition period.
-  lap: number;
-  track_status: string;
-  drivers: DriverSnapshot[];
-  positions: TrackPositionSample[];
 }
 
 export interface ReplayEventListResponse {
@@ -284,8 +279,8 @@ export interface IngestResponse {
   cached_endpoints: number;
   endpoint_coverage: EndpointCoverage[];
   generated_snapshots: number;
-  track_geometry?: IngestTrackGeometrySummary | null;
-  available_channels?: AvailableChannels | null;
+  track_geometry: IngestTrackGeometrySummary | null;
+  available_channels: AvailableChannels | null;
   warnings: string[];
-  error?: string | null;
+  error: string | null;
 }

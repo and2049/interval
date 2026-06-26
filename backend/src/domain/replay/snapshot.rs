@@ -16,10 +16,6 @@ pub struct ReplaySnapshot {
     pub weather: ReplayWeatherSection,
     pub race_control: RaceControlSection,
     pub derived_metrics: Vec<DerivedMetric>,
-    pub lap: i32,
-    pub track_status: String,
-    pub drivers: Vec<DriverSnapshot>,
-    pub positions: Vec<TrackPositionSample>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

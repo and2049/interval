@@ -1,9 +1,36 @@
-import { createEffect, createResource, createSignal, For, Show } from "solid-js";
-import type { IngestResponse, IngestStatus, SessionReadiness } from "../../../shared/types/api";
+import { batch, createEffect, createResource, createSignal, Show, untrack } from "solid-js";
+import type { IngestResponse, Session } from "../../../shared/types/api";
 import { api } from "../lib/api";
+import {
+  canOpenSessionFromCache,
+  canOpenSessionAfterIngest,
+  ingestOutcome,
+  ingestOutcomeClass,
+  sessionActionLabel,
+  sessionIngestErrorMessage,
+  sessionStatusBadgeText,
+  sessionStatusClass,
+  shouldClearTransientSessionAction,
+  type SessionActionState
+} from "../lib/sessionReadiness";
+import {
+  nextMeetingSelection,
+  nextSeasonSelection,
+  nextSessionSelection,
+  readinessForSession,
+  shouldSyncActiveSessionSelection,
+  meetingOptions,
+  seasonOptions,
+  sessionOptions
+} from "../lib/sessionSelection";
+import { SelectField } from "./SelectField";
 
 interface SessionSelectorProps {
+  activeSession?: Session;
   activeSessionKey: number;
+  preferredSeason?: number;
+  preferredMeeting?: number;
+  preferredSession?: number;
   onOpenSession: (sessionKey: number) => void;
 }
 
@@ -11,136 +38,203 @@ export function SessionSelector(props: SessionSelectorProps) {
   const [selectedSeason, setSelectedSeason] = createSignal<number>();
   const [selectedMeeting, setSelectedMeeting] = createSignal<number>();
   const [selectedSession, setSelectedSession] = createSignal<number>();
-  const [ingestState, setIngestState] = createSignal<"idle" | "ingesting" | "failed">("idle");
+  const [ingestState, setIngestState] = createSignal<SessionActionState>("idle");
+  const [ingestError, setIngestError] = createSignal<string>();
   const [lastIngest, setLastIngest] = createSignal<IngestResponse>();
 
   const [seasons] = createResource(api.seasons);
   const [meetings] = createResource(selectedSeason, api.meetings);
-  const [sessions] = createResource(selectedMeeting, api.sessions);
+  const [sessions, { refetch: refetchSessions }] = createResource(selectedMeeting, api.sessions);
+  let lastSelectedSession: number | undefined;
+  let lastActiveSessionKey: number | undefined;
 
   createEffect(() => {
-    const firstSeason = seasons()?.[0]?.year;
-    if (selectedSeason() == null && firstSeason != null) setSelectedSeason(firstSeason);
+    const active = props.activeSession;
+    if (!active) return;
+
+    const selected = {
+      season: selectedSeason(),
+      meeting: selectedMeeting(),
+      session: selectedSession()
+    };
+    if (shouldSyncActiveSessionSelection(active, selected, lastActiveSessionKey)) {
+      batch(() => {
+        setSelectedSeason(active.year);
+        setSelectedMeeting(active.meeting_key);
+        setSelectedSession(active.session_key);
+      });
+    }
+    lastActiveSessionKey = active.session_key;
   });
 
   createEffect(() => {
-    const firstMeeting = meetings()?.[0]?.meeting_key;
-    if (firstMeeting != null) setSelectedMeeting(firstMeeting);
+    const next = nextSeasonSelection(seasons(), selectedSeason(), props.preferredSeason);
+    if (next !== selectedSeason()) setSelectedSeason(next);
   });
 
   createEffect(() => {
-    const firstSession = sessions()?.[0]?.session.session_key;
-    if (firstSession != null) setSelectedSession(firstSession);
+    const next = nextMeetingSelection(meetings(), selectedMeeting(), props.preferredMeeting);
+    if (next !== selectedMeeting()) setSelectedMeeting(next);
+  });
+
+  createEffect(() => {
+    const next = nextSessionSelection(sessions(), selectedSession(), props.preferredSession);
+    if (next !== selectedSession()) setSelectedSession(next);
+  });
+
+  createEffect(() => {
+    const nextSession = selectedSession();
+    untrack(() => {
+      if (
+        shouldClearTransientSessionAction({
+          previousSession: lastSelectedSession,
+          selectedSession: nextSession,
+          ingestState: ingestState()
+        })
+      ) {
+        setIngestState("idle");
+        setIngestError(undefined);
+        setLastIngest(undefined);
+      }
+      lastSelectedSession = nextSession;
+    });
   });
 
   const selectedReadiness = () =>
-    sessions()?.find((entry) => entry.session.session_key === selectedSession());
+    readinessForSession(sessions(), selectedSession());
 
   const openSelected = async () => {
     const key = selectedSession();
     if (key == null) return;
+    const readiness = selectedReadiness();
+    if (canOpenSessionFromCache(readiness)) {
+      props.onOpenSession(key);
+      setIngestState("idle");
+      setIngestError(undefined);
+      setLastIngest(undefined);
+      return;
+    }
+
     setIngestState("ingesting");
+    setIngestError(undefined);
     try {
       const response = await api.ingest(key);
       setLastIngest(response);
-      props.onOpenSession(key);
-      setIngestState("idle");
-    } catch {
+      await refetchSessions();
+      if (canOpenSessionAfterIngest(response)) {
+        props.onOpenSession(key);
+        setIngestState("idle");
+      } else {
+        setIngestError(response.error ?? "Ingest did not produce replay frames.");
+        setIngestState("failed");
+      }
+    } catch (error) {
+      setIngestError(error instanceof Error ? error.message : "Ingest failed.");
+      void refetchSessions();
       setIngestState("failed");
     }
   };
 
+  const chooseSeason = (season: number) => {
+    batch(() => {
+      setSelectedSeason(season);
+      setSelectedMeeting(undefined);
+      setSelectedSession(undefined);
+    });
+  };
+
+  const chooseMeeting = (meeting: number) => {
+    batch(() => {
+      setSelectedMeeting(meeting);
+      setSelectedSession(undefined);
+    });
+  };
+
+  const actionLabel = () =>
+    sessionActionLabel({
+      ingestState: ingestState(),
+      selectedSession: selectedSession(),
+      activeSessionKey: props.activeSessionKey,
+      readiness: selectedReadiness()
+    });
+  const latestOutcome = () => ingestOutcome(lastIngest());
+
   return (
-    <div class="flex items-center gap-2 border-b border-line bg-[#101419] px-3 py-2 font-mono text-[0.72rem]">
-      <label class="text-slate-500">Season</label>
-      <select
-        class="border border-line bg-panel px-2 py-1 text-slate-100"
+    <div
+      class="flex items-center gap-2 overflow-x-auto border-b border-line bg-[#101419] px-3 py-2 font-mono text-[0.72rem]"
+      data-testid="session-selector"
+    >
+      <SelectField
+        label="Season"
+        testId="season-select"
         value={selectedSeason()}
+        options={seasonOptions(seasons())}
         disabled={seasons.loading}
-        onChange={(event) => setSelectedSeason(Number(event.currentTarget.value))}
-      >
-        <For each={seasons() ?? []}>
-          {(season) => <option value={season.year}>{season.year}</option>}
-        </For>
-      </select>
+        onChange={chooseSeason}
+      />
 
-      <label class="ml-2 text-slate-500">Meeting</label>
-      <select
-        class="max-w-64 border border-line bg-panel px-2 py-1 text-slate-100"
+      <SelectField
+        label="Meeting"
+        testId="meeting-select"
+        class="max-w-56 border border-line bg-panel px-2 py-1 text-slate-100 2xl:max-w-64"
+        labelClass="ml-2 text-slate-500"
         value={selectedMeeting()}
+        options={meetingOptions(meetings())}
         disabled={meetings.loading}
-        onChange={(event) => setSelectedMeeting(Number(event.currentTarget.value))}
-      >
-        <For each={meetings() ?? []}>
-          {(meeting) => <option value={meeting.meeting_key}>{meeting.name}</option>}
-        </For>
-      </select>
+        onChange={chooseMeeting}
+      />
 
-      <label class="ml-2 text-slate-500">Session</label>
-      <select
-        class="border border-line bg-panel px-2 py-1 text-slate-100"
+      <SelectField
+        label="Session"
+        testId="session-select"
+        labelClass="ml-2 text-slate-500"
         value={selectedSession()}
+        options={sessionOptions(sessions())}
         disabled={sessions.loading}
-        onChange={(event) => setSelectedSession(Number(event.currentTarget.value))}
-      >
-        <For each={sessions() ?? []}>
-          {(entry: SessionReadiness) => (
-            <option value={entry.session.session_key}>
-              {entry.session.name} · {statusLabel(entry)}
-            </option>
-          )}
-        </For>
-      </select>
+        onChange={setSelectedSession}
+      />
 
       <Show when={selectedReadiness()}>
         {(entry) => (
-          <span class={`border px-2 py-1 ${statusClass(entry().ingest_status)}`}>
-            {entry().is_demo ? "DEMO" : entry().ingest_status.replace("_", " ").toUpperCase()}
+          <span class={`border px-2 py-1 ${sessionStatusClass(entry().ingest_status)}`}>
+            {sessionStatusBadgeText(entry())}
           </span>
         )}
       </Show>
 
       <button
         class="ml-2 border border-mint bg-mint/10 px-3 py-1 font-semibold text-mint disabled:border-line disabled:text-slate-500"
+        data-testid="session-open"
         disabled={selectedSession() == null || ingestState() === "ingesting"}
         onClick={openSelected}
       >
-        {ingestState() === "ingesting" ? "INGESTING" : selectedSession() === props.activeSessionKey ? "RELOAD" : "INGEST + OPEN"}
+        {actionLabel()}
       </button>
 
       <Show when={ingestState() === "failed"}>
         <span class="text-danger">
-          Ingest failed{selectedReadiness()?.last_error ? `: ${selectedReadiness()?.last_error}` : "."}
+          {sessionIngestErrorMessage({
+            ingestError: ingestError(),
+            readiness: selectedReadiness()
+          })}
         </span>
       </Show>
-      <Show when={lastIngest()?.warnings.length}>
-        <span class="max-w-[28rem] truncate text-amber">
-          {lastIngest()!.warnings[0]}
-        </span>
+      <Show when={!sessions.loading && selectedMeeting() != null && (sessions()?.length ?? 0) === 0}>
+        <span class="text-amber">No race session available for this meeting.</span>
+      </Show>
+      <Show when={latestOutcome()}>
+        {(outcome) => (
+          <span
+            class={`max-w-[28rem] truncate ${ingestOutcomeClass(outcome().tone)}`}
+            title={outcome().title}
+          >
+            {outcome().label}
+          </span>
+        )}
       </Show>
       <Show when={meetings.error || sessions.error}>
         <span class="text-danger">OpenF1 discovery failed.</span>
       </Show>
     </div>
   );
-}
-
-function statusLabel(entry: SessionReadiness) {
-  if (entry.is_demo) return "demo";
-  if (entry.replay_ready) return "ready";
-  return entry.ingest_status.replace("_", " ");
-}
-
-function statusClass(status: IngestStatus) {
-  switch (status) {
-    case "ready":
-      return "border-mint text-mint";
-    case "failed":
-      return "border-danger text-danger";
-    case "fetching":
-    case "normalizing":
-      return "border-amber text-amber";
-    default:
-      return "border-line text-slate-400";
-  }
 }

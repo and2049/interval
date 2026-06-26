@@ -31,6 +31,14 @@ impl Default for HistoricalClient {
 }
 
 impl HistoricalClient {
+    pub fn with_base_url(base_url: Url) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            base_url,
+            limiter: Arc::new(Mutex::new(RateLimiter::default())),
+        }
+    }
+
     pub async fn fetch_meetings(&self, year: i32) -> Result<Value, HistoricalError> {
         self.fetch_endpoint("meetings", &[("year", year.to_string())])
             .await

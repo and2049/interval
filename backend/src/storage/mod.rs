@@ -15,7 +15,7 @@ pub use replay_store::{
 };
 pub use schema::{connect, migrate};
 pub use sessions::{
-    get_session, list_meetings, list_seasons, list_session_readiness, list_sessions,
+    get_meeting, get_session, list_meetings, list_seasons, list_session_readiness, list_sessions,
     upsert_meetings, upsert_sessions,
 };
 pub use track_geometry_store::{get_track_geometry, replace_track_geometry};

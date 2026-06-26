@@ -81,6 +81,24 @@ pub async fn list_meetings(pool: &SqlitePool, year: i32) -> sqlx::Result<Vec<Mee
         })
 }
 
+pub async fn get_meeting(pool: &SqlitePool, meeting_key: i64) -> sqlx::Result<Option<Meeting>> {
+    sqlx::query(
+        "SELECT meeting_key, year, name, country, location FROM meetings WHERE meeting_key = ?",
+    )
+    .bind(meeting_key)
+    .fetch_optional(pool)
+    .await
+    .map(|row| {
+        row.map(|row| Meeting {
+            meeting_key: row.get("meeting_key"),
+            year: row.get("year"),
+            name: row.get("name"),
+            country: row.get("country"),
+            location: row.get("location"),
+        })
+    })
+}
+
 pub async fn list_sessions(pool: &SqlitePool, meeting_key: i64) -> sqlx::Result<Vec<Session>> {
     sqlx::query("SELECT session_key, meeting_key, year, name, session_type, start_time, end_time, total_laps FROM sessions WHERE meeting_key = ? AND session_type = 'race' ORDER BY start_time")
         .bind(meeting_key)

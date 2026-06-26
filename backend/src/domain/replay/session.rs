@@ -1,5 +1,5 @@
 use super::REPLAY_CONTRACT_VERSION;
-use crate::domain::{Driver, Session, TrackGeometryQuality, TrackGeometrySource};
+use crate::domain::{Driver, Meeting, Session, TrackGeometryQuality, TrackGeometrySource};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -7,6 +7,8 @@ pub struct ReplayMetadata {
     #[serde(default = "contract_version")]
     pub contract_version: String,
     pub session: Session,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting: Option<Meeting>,
     pub duration_seconds: f64,
     #[serde(default)]
     pub frame_step_seconds: f64,
@@ -24,8 +26,6 @@ pub struct ReplayMetadata {
     pub track_geometry: TrackGeometrySummary,
     #[serde(default)]
     pub endpoints: EndpointLinks,
-    #[serde(default = "default_track_geometry_status")]
-    pub track_geometry_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,8 +73,4 @@ pub struct EndpointLinks {
 
 fn contract_version() -> String {
     REPLAY_CONTRACT_VERSION.to_string()
-}
-
-fn default_track_geometry_status() -> String {
-    "missing".to_string()
 }

@@ -2,6 +2,16 @@ import type { SectorStatus, TyreCompound } from "../../../shared/types/api";
 
 export function formatRaceClock(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));
+  return formatClockParts(total);
+}
+
+export function formatEventClock(seconds: number): string {
+  const total = Math.floor(seconds);
+  if (total < 0) return `T-${formatClockParts(Math.abs(total))}`;
+  return formatClockParts(total);
+}
+
+function formatClockParts(total: number): string {
   const mins = Math.floor(total / 60).toString().padStart(2, "0");
   const secs = (total % 60).toString().padStart(2, "0");
   return `${mins}:${secs}`;
@@ -12,6 +22,21 @@ export function formatLapTime(value?: number | null): string {
   const minutes = Math.floor(value / 60);
   const seconds = value - minutes * 60;
   return `${minutes}:${seconds.toFixed(3).padStart(6, "0")}`;
+}
+
+export function formatTemperature(value?: number | null): string {
+  if (value == null || Number.isNaN(value)) return "--";
+  return `${value.toFixed(1)}C`;
+}
+
+export function formatPercent(value?: number | null): string {
+  if (value == null || Number.isNaN(value)) return "--";
+  return `${value.toFixed(0)}%`;
+}
+
+export function formatSpeed(value?: number | null): string {
+  if (value == null || Number.isNaN(value)) return "--";
+  return `${value.toFixed(1)} m/s`;
 }
 
 export function sectorClass(status: SectorStatus): string {
@@ -36,6 +61,12 @@ export function compoundClass(compound: TyreCompound): string {
     default:
       return "border-slate-500 text-slate-400";
   }
+}
+
+export function compoundAbbreviation(compound: TyreCompound): string {
+  if (compound === "INTERMEDIATE") return "I";
+  if (compound === "UNKNOWN") return "--";
+  return compound[0] ?? "--";
 }
 
 export function trendClass(trend: string): string {
