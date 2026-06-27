@@ -1,27 +1,23 @@
-use crate::{
-    domain::{
-        DataQuality, MapMode, RaceControlMessage, RaceControlSection, RaceState, ReplayCursor,
-        ReplaySnapshot, ReplayWeatherSection, Session, TimingSection, TrackGeometry,
-        TrackGeometryQuality, TrackGeometrySource, TrackSection, WeatherSample,
-        REPLAY_CONTRACT_VERSION,
-    },
-    normalization::RaceData,
+use crate::domain::{
+    DataQuality, MapMode, RaceControlSection, RaceState, ReplayCursor, ReplaySnapshot,
+    ReplayWeatherSection, Session, TimingSection, TrackGeometry, TrackGeometryQuality,
+    TrackGeometrySource, TrackSection, REPLAY_CONTRACT_VERSION,
 };
 
-pub fn build_snapshot(
+pub(crate) fn build_indexed_snapshot(
     session: &Session,
-    data: &RaceData,
+    index: &super::indexed_data::ReplayDataIndex<'_>,
     geometry: &TrackGeometry,
     t: f64,
     frame_index: i64,
 ) -> ReplaySnapshot {
-    let lap = super::timing::latest_lap_number(data, t);
-    let positions = super::track_positions::latest_positions(data, geometry, t);
-    let weather = latest_weather(&data.weather, t);
-    let rows = super::timing::timing_rows(data, t);
-    let track_status = track_status(&data.race_control, t);
-    let race_control_messages = race_control_history(&data.race_control, t);
-    let derived_metrics = crate::analytics::recent_pace_metrics(&rows, &data.laps, t);
+    let lap = index.latest_lap_number(t);
+    let positions = index.track_positions(geometry, t);
+    let weather = index.latest_weather(t);
+    let rows = index.timing_rows(t);
+    let track_status = index.track_status(t);
+    let race_control_messages = index.race_control_history(t);
+    let derived_metrics = index.recent_pace_metrics(&rows, t);
     let weather_quality = if weather.is_some() {
         DataQuality::Ready
     } else {
@@ -98,34 +94,6 @@ fn timing_quality(rows: &[crate::domain::DriverSnapshot]) -> DataQuality {
     }
 }
 
-fn latest_weather(weather: &[WeatherSample], t: f64) -> Option<WeatherSample> {
-    weather
-        .iter()
-        .filter(|sample| sample.t <= t)
-        .max_by(|a, b| a.t.total_cmp(&b.t))
-        .cloned()
-}
-
-fn track_status(events: &[RaceControlMessage], t: f64) -> String {
-    events
-        .iter()
-        .filter(|event| event.t <= t)
-        .filter(|event| event.flag.is_some())
-        .max_by(|a, b| a.t.total_cmp(&b.t))
-        .and_then(|event| event.flag.clone())
-        .unwrap_or_else(|| "green".to_string())
-}
-
-fn race_control_history(events: &[RaceControlMessage], t: f64) -> Vec<RaceControlMessage> {
-    let mut history = events
-        .iter()
-        .filter(|event| event.t <= t)
-        .cloned()
-        .collect::<Vec<_>>();
-    history.sort_by(|a, b| a.t.total_cmp(&b.t).then_with(|| a.message.cmp(&b.message)));
-    history
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,47 +146,6 @@ mod tests {
             timing_quality(&[driver_snapshot(crate::domain::RankSource::OpenF1Position)]),
             DataQuality::Ready
         );
-    }
-
-    #[test]
-    fn track_status_uses_latest_flag_by_timestamp() {
-        let events = vec![
-            race_control(120.0, Some("green"), "green flag"),
-            race_control(60.0, Some("yellow"), "yellow flag"),
-            race_control(90.0, None, "message only"),
-        ];
-
-        assert_eq!(track_status(&events, 100.0), "yellow");
-        assert_eq!(track_status(&events, 130.0), "green");
-    }
-
-    #[test]
-    fn race_control_history_is_ordered_by_event_time() {
-        let events = vec![
-            race_control(120.0, Some("green"), "green flag"),
-            race_control(60.0, Some("yellow"), "yellow flag"),
-            race_control(90.0, None, "message only"),
-        ];
-
-        let history = race_control_history(&events, 120.0);
-
-        assert_eq!(
-            history
-                .iter()
-                .map(|event| event.message.as_str())
-                .collect::<Vec<_>>(),
-            vec!["yellow flag", "message only", "green flag"]
-        );
-    }
-
-    fn race_control(t: f64, flag: Option<&str>, message: &str) -> RaceControlMessage {
-        RaceControlMessage {
-            t,
-            category: "race_control".to_string(),
-            message: message.to_string(),
-            flag: flag.map(str::to_string),
-            scope: None,
-        }
     }
 
     fn driver_snapshot(rank_source: crate::domain::RankSource) -> crate::domain::DriverSnapshot {

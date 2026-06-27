@@ -70,12 +70,12 @@ describe("replay control input parsing", () => {
 
 describe("quantizeReplayFrameTime", () => {
   test("uses the replay frame cadence to request persisted frames", () => {
-    const replayMetadata = metadata(9472, { frameStepSeconds: 5, maxT: 102 });
+    const replayMetadata = metadata(9472, { frameStepSeconds: 0.5, maxT: 102 });
 
     expect(quantizeReplayFrameTime(0, replayMetadata)).toBe(0);
-    expect(quantizeReplayFrameTime(4.9, replayMetadata)).toBe(0);
-    expect(quantizeReplayFrameTime(5, replayMetadata)).toBe(5);
-    expect(quantizeReplayFrameTime(101.9, replayMetadata)).toBe(100);
+    expect(quantizeReplayFrameTime(0.49, replayMetadata)).toBe(0);
+    expect(quantizeReplayFrameTime(0.5, replayMetadata)).toBe(0.5);
+    expect(quantizeReplayFrameTime(101.9, replayMetadata)).toBe(101.5);
   });
 
   test("falls back to clamping when metadata has no usable frame cadence", () => {
@@ -147,8 +147,8 @@ describe("replay resource gating", () => {
 
   test("builds snapshot requests only from active-session metadata", () => {
     expect(
-      snapshotRequest(9472, metadata(9472, { frameStepSeconds: 5, maxT: 100 }), 27.4)
-    ).toEqual({ key: 9472, t: 25 });
+      snapshotRequest(9472, metadata(9472, { frameStepSeconds: 0.5, maxT: 100 }), 27.4)
+    ).toEqual({ key: 9472, t: 27 });
     expect(snapshotRequest(9839, metadata(9472), 25)).toBeUndefined();
   });
 

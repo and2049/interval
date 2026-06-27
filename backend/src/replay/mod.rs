@@ -3,14 +3,13 @@ mod curated_tracks;
 mod derived_events;
 mod events;
 mod generator;
+mod indexed_data;
 mod ingest_summary;
 mod metadata_builder;
 mod snapshot_builder;
 pub mod streaming;
-mod timing;
 mod track_geometry_builder;
 mod track_geometry_math;
-mod track_positions;
 pub mod track_projection;
 
 use crate::domain::{ReplayMetadata, ReplaySnapshot};
@@ -30,6 +29,14 @@ pub async fn snapshot_at(
     t: f64,
 ) -> sqlx::Result<Option<ReplaySnapshot>> {
     crate::storage::get_replay_snapshot(pool, session_key, t).await
+}
+
+pub async fn snapshots_from(
+    pool: &SqlitePool,
+    session_key: i64,
+    from_t: f64,
+) -> sqlx::Result<Vec<ReplaySnapshot>> {
+    crate::storage::list_replay_snapshots_from(pool, session_key, from_t).await
 }
 
 #[cfg(test)]

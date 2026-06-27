@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { TrackBounds, TrackPoint } from "../../../shared/types/api";
-import { closedRoadPath, pointAtRelativeDistance, pointsToPath, scalePoint } from "./trackGeometry";
+import {
+  closedRoadPath,
+  createTrackPointLookup,
+  pointAtRelativeDistance,
+  pointAtRelativeDistanceLookup,
+  pointsToPath,
+  scalePoint
+} from "./trackGeometry";
 
 const bounds: TrackBounds = {
   min_x: 0,
@@ -43,6 +50,13 @@ describe("closedRoadPath", () => {
 describe("pointAtRelativeDistance", () => {
   test("interpolates between centerline points", () => {
     expect(pointAtRelativeDistance(centerline, 0.25)).toEqual({ x: 50, y: 25 });
+  });
+
+  test("uses a reusable lookup for repeated point interpolation", () => {
+    const lookup = createTrackPointLookup(centerline);
+
+    expect(lookup).toBeDefined();
+    expect(pointAtRelativeDistanceLookup(lookup!, 0.75)).toEqual({ x: 150, y: 75 });
   });
 
   test("wraps negative and overflow distances", () => {

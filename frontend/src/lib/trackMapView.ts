@@ -4,7 +4,13 @@ import type {
   TrackGeometry,
   TrackPositionSample
 } from "../../../shared/types/api";
-import { hasUsableGeometry, pointAtRelativeDistance, scalePoint } from "./trackGeometry";
+import {
+  hasUsableGeometry,
+  pointAtRelativeDistance,
+  pointAtRelativeDistanceLookup,
+  scalePoint,
+  type TrackPointLookup
+} from "./trackGeometry";
 
 export interface TrackDistanceMarker {
   label: string;
@@ -20,6 +26,7 @@ export interface TrackDriverDot {
   quality: TrackPositionSample["quality"];
   label: string;
   isLeader: boolean;
+  showCode: boolean;
 }
 
 export type TrackMapRenderMode = "real" | "schematic" | "pending" | "error";
@@ -82,9 +89,11 @@ export function driverDots(
   geometry?: TrackGeometry
 ): TrackDriverDot[] {
   const drivers = new Map(timingRows.map((row) => [row.driver.driver_number, row.driver]));
+  const ranks = new Map(timingRows.map((row) => [row.driver.driver_number, row.position]));
   const leaderNumber = timingRows[0]?.driver.driver_number;
   return positions.map((position) => {
     const driver = drivers.get(position.driver_number);
+    const rank = ranks.get(position.driver_number);
     return {
       code: driver?.code ?? String(position.driver_number),
       color: driver ? `#${driver.team_colour}` : "#2cf5bf",
@@ -93,9 +102,59 @@ export function driverDots(
       source: position.source,
       quality: position.quality,
       label: driverDotLabel(driver?.code ?? String(position.driver_number), position),
-      isLeader: position.driver_number === leaderNumber
+      isLeader: position.driver_number === leaderNumber,
+      showCode: rank != null && rank <= 3
     };
   });
+}
+
+export function interpolateTrackPositions(
+  from: TrackPositionSample[] | undefined,
+  to: TrackPositionSample[],
+  progress: number,
+  geometry?: TrackGeometry,
+  centerlineLookup?: TrackPointLookup
+): TrackPositionSample[] {
+  if (!from?.length) return to;
+
+  const ratio = clamp(progress, 0, 1);
+  if (ratio >= 1) return to;
+  if (ratio <= 0) return to.map((position) => from.find((row) => row.driver_number === position.driver_number) ?? position);
+
+  const previousByDriver = new Map(from.map((position) => [position.driver_number, position]));
+  return to.map((next) => {
+    const previous = previousByDriver.get(next.driver_number);
+    if (!previous || !canInterpolatePosition(previous) || !canInterpolatePosition(next)) {
+      return next;
+    }
+
+    const relativeDistance = interpolateRelativeDistance(
+      previous.relative_distance,
+      next.relative_distance,
+      ratio
+    );
+    const point = pointForRelativeDistance(relativeDistance, geometry, centerlineLookup);
+
+    return {
+      ...next,
+      x: point?.x ?? interpolateNumber(previous.x, next.x, ratio),
+      y: point?.y ?? interpolateNumber(previous.y, next.y, ratio),
+      z: interpolateOptionalNumber(previous.z, next.z, ratio),
+      relative_distance: relativeDistance ?? next.relative_distance
+    };
+  });
+}
+
+function pointForRelativeDistance(
+  relativeDistance: number | undefined,
+  geometry?: TrackGeometry,
+  centerlineLookup?: TrackPointLookup
+) {
+  if (relativeDistance == null) return undefined;
+  if (centerlineLookup) return pointAtRelativeDistanceLookup(centerlineLookup, relativeDistance);
+  return hasRealTrackGeometry(geometry)
+    ? pointAtRelativeDistance(geometry.centerline, relativeDistance)
+    : undefined;
 }
 
 export function startFinishLine(geometry?: TrackGeometry) {
@@ -111,9 +170,51 @@ export function startFinishLine(geometry?: TrackGeometry) {
   };
 }
 
+function canInterpolatePosition(position: Pick<TrackPositionSample, "x" | "y">) {
+  return Number.isFinite(position.x) && Number.isFinite(position.y);
+}
+
+function interpolateNumber(from: number, to: number, progress: number) {
+  return from + (to - from) * progress;
+}
+
+function interpolateOptionalNumber(
+  from: number | null | undefined,
+  to: number | null | undefined,
+  progress: number
+) {
+  if (from == null && to == null) return to;
+  if (from == null) return to;
+  if (to == null) return from;
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return to;
+  return interpolateNumber(from, to, progress);
+}
+
+function interpolateRelativeDistance(
+  from: number | null | undefined,
+  to: number | null | undefined,
+  progress: number
+) {
+  if (from == null || to == null || !Number.isFinite(from) || !Number.isFinite(to)) {
+    return undefined;
+  }
+
+  const normalizedFrom = wrapUnit(from);
+  let normalizedTo = wrapUnit(to);
+  if (normalizedTo < normalizedFrom && normalizedFrom - normalizedTo > 0.5) {
+    normalizedTo += 1;
+  }
+
+  return wrapUnit(interpolateNumber(normalizedFrom, normalizedTo, progress));
+}
+
 function clamp(value: number, min: number, max: number) {
   if (!Number.isFinite(value)) return min;
   return Math.max(min, Math.min(max, value));
+}
+
+function wrapUnit(value: number) {
+  return ((value % 1) + 1) % 1;
 }
 
 function driverDotLabel(code: string, position: TrackPositionSample): string {

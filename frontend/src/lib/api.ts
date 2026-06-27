@@ -121,6 +121,13 @@ export const api = {
         "session key"
       )}/replay/snapshot?t=${finiteNumber(t, "replay time").toFixed(3)}`
     ),
+  streamUrl: (sessionKey: number, from: number, speed: number) =>
+    `/api/sessions/${positiveInteger(
+      sessionKey,
+      "session key"
+    )}/replay/stream?from=${finiteNumber(from, "replay start time").toFixed(
+      3
+    )}&speed=${finiteNumber(speed, "replay speed").toFixed(3)}`,
   events: (sessionKey: number) =>
     json<ReplayEventListResponse>(
       `/api/sessions/${positiveInteger(sessionKey, "session key")}/replay/events`

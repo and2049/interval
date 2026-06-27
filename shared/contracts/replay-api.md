@@ -98,7 +98,7 @@ Returns session metadata, optional meeting identity, replay duration, frame boun
     "location": "Sakhir"
   },
   "duration_seconds": 5996.749,
-  "frame_step_seconds": 5.0,
+  "frame_step_seconds": 0.5,
   "available_channels": {
     "timing": true,
     "location": true,
@@ -157,6 +157,8 @@ Clients may animate their own playback cursor, but should request snapshots on p
 ```
 
 `track.quality` describes the position data used by the map for that snapshot. For the Bahrain MVP fallback, geometry can be ready while map positions are still `projected`.
+
+`race_control.messages` in a snapshot is a recent panel window for the current replay time, capped to keep half-second snapshots lightweight. Use `GET /api/sessions/{session_key}/replay/events` for the complete canonical race-control and derived event timeline.
 
 `derived_metrics` is backend-owned snapshot data, not a frontend calculation surface. MVP metrics include recent 3-lap pace values for drivers with enough completed valid laps:
 

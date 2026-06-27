@@ -11,7 +11,8 @@ pub use demo::{seed_demo_session, DEMO_SESSION_KEY};
 pub use ingest_status_store::{get_ingest_status, set_ingest_status};
 pub use raw_cache::{load_raw_bundle, store_raw_bundle};
 pub use replay_store::{
-    get_replay_events, get_replay_metadata, get_replay_snapshot, replace_replay,
+    get_replay_events, get_replay_metadata, get_replay_snapshot, list_replay_snapshots_from,
+    list_replay_snapshots_page, replace_replay,
 };
 pub use schema::{connect, migrate};
 pub use sessions::{

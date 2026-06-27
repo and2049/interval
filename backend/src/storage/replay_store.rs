@@ -93,6 +93,44 @@ pub async fn get_replay_snapshot(
         .transpose()
 }
 
+pub async fn list_replay_snapshots_from(
+    pool: &SqlitePool,
+    session_key: i64,
+    from_t: f64,
+) -> sqlx::Result<Vec<ReplaySnapshot>> {
+    let rows = sqlx::query(
+        "SELECT payload FROM replay_snapshots WHERE session_key = ? AND t >= ? ORDER BY t ASC",
+    )
+    .bind(session_key)
+    .bind(from_t)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| super::decode(row.get::<String, _>("payload")))
+        .collect()
+}
+
+pub async fn list_replay_snapshots_page(
+    pool: &SqlitePool,
+    session_key: i64,
+    from_t: f64,
+    limit: i64,
+) -> sqlx::Result<Vec<ReplaySnapshot>> {
+    let rows = sqlx::query(
+        "SELECT payload FROM replay_snapshots WHERE session_key = ? AND t >= ? ORDER BY t ASC LIMIT ?",
+    )
+    .bind(session_key)
+    .bind(from_t)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| super::decode(row.get::<String, _>("payload")))
+        .collect()
+}
+
 pub async fn get_replay_events(
     pool: &SqlitePool,
     session_key: i64,

@@ -213,6 +213,77 @@ function Assert-ReplayStream($url, $seconds) {
     }
 }
 
+function Assert-ReplayStreamCadence($url, $seconds) {
+    $client = [System.Net.Http.HttpClient]::new()
+    $client.Timeout = [TimeSpan]::FromSeconds($seconds)
+    $response = $null
+    $stream = $null
+    $reader = $null
+    try {
+        $response = $client.GetAsync(
+            $url,
+            [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead
+        ).GetAwaiter().GetResult()
+
+        if (-not $response.IsSuccessStatusCode) {
+            throw "Replay cadence stream returned HTTP $([int]$response.StatusCode)"
+        }
+
+        $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $reader = [System.IO.StreamReader]::new($stream)
+        $deadline = (Get-Date).AddSeconds($seconds)
+        $currentEvent = $null
+        $snapshots = @()
+        $started = [System.Diagnostics.Stopwatch]::StartNew()
+
+        while ((Get-Date) -lt $deadline -and $snapshots.Count -lt 3) {
+            $lineTask = $reader.ReadLineAsync()
+            if (-not $lineTask.Wait(500)) {
+                continue
+            }
+
+            $line = $lineTask.Result
+            if ($null -eq $line) {
+                break
+            }
+
+            if ($line.StartsWith("event:")) {
+                $currentEvent = $line.Substring(6).Trim()
+                continue
+            }
+
+            if ($currentEvent -ne "snapshot" -or -not $line.StartsWith("data:")) {
+                continue
+            }
+
+            $payload = $line.Substring(5).TrimStart() | ConvertFrom-Json
+            $snapshots += [pscustomobject]@{
+                t = [double]$payload.cursor.t
+                wallMs = $started.ElapsedMilliseconds
+            }
+        }
+
+        Assert-CountAtLeast $snapshots 3 "cadence stream snapshots"
+        Assert-Equal $snapshots[0].t 600.0 "cadence stream start frame"
+        Assert-Equal $snapshots[1].t 600.5 "cadence stream second frame"
+        Assert-Equal $snapshots[2].t 601.0 "cadence stream third frame"
+        if ($snapshots[2].wallMs -gt 3000) {
+            throw "cadence stream delivered three frames too slowly: $($snapshots[2].wallMs)ms"
+        }
+    } finally {
+        if ($reader) {
+            $reader.Dispose()
+        }
+        if ($stream) {
+            $stream.Dispose()
+        }
+        if ($response) {
+            $response.Dispose()
+        }
+        $client.Dispose()
+    }
+}
+
 Ensure-Directory $tmpDir
 
 cargo build -p interval-backend
@@ -277,6 +348,7 @@ try {
     Assert-ReplayEvents $events "events"
 
     Assert-ReplayStream "$backendUrl/api/sessions/9472/replay/stream" $TimeoutSeconds
+    Assert-ReplayStreamCadence "$backendUrl/api/sessions/9472/replay/stream?from=600&speed=4" $TimeoutSeconds
 
     $frontendStarted = Start-Process `
         -FilePath "node" `

@@ -62,6 +62,9 @@ export default function App() {
             snapshot={snapshot()!}
             geometry={replay.activeGeometry()}
             geometryError={replay.activeGeometryError()}
+            frameStepSeconds={metadata()!.frame_step_seconds}
+            playing={replay.playing()}
+            speed={replay.speed()}
           />
           <SidePanels
             snapshot={snapshot()!}

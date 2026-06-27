@@ -3,10 +3,13 @@ use crate::domain::{
     REPLAY_CONTRACT_VERSION,
 };
 use chrono::Utc;
+use serde::Deserialize;
 
 pub const BAHRAIN_SESSION_KEY: i64 = 9472;
 
-const TRACK_WIDTH: f64 = 190.0;
+const TRACK_WIDTH: f64 = 15.0;
+const DENSIFIED_POINT_COUNT: usize = 240;
+const ASSETS_DIR: &str = "backend/assets/tracks";
 
 const BAHRAIN_CENTERLINE: &[(f64, f64)] = &[
     (1120.0, 1420.0),
@@ -49,15 +52,39 @@ const BAHRAIN_CENTERLINE: &[(f64, f64)] = &[
     (1120.0, 1420.0),
 ];
 
+#[derive(Deserialize)]
+struct TrackAssetJson {
+    centerline: Vec<(f64, f64)>,
+    rotation_deg: Option<f64>,
+}
+
 pub fn curated_geometry(session_key: i64) -> Option<TrackGeometry> {
+    if let Some(geometry) = load_asset_geometry(session_key) {
+        return Some(geometry);
+    }
     match session_key {
-        BAHRAIN_SESSION_KEY => Some(build_geometry(session_key, BAHRAIN_CENTERLINE)),
+        BAHRAIN_SESSION_KEY => Some(build_geometry(session_key, BAHRAIN_CENTERLINE, 0.0)),
         _ => None,
     }
 }
 
-fn build_geometry(session_key: i64, centerline: &[(f64, f64)]) -> TrackGeometry {
-    let mut points = centerline
+fn load_asset_geometry(session_key: i64) -> Option<TrackGeometry> {
+    let path = format!("{ASSETS_DIR}/{session_key}.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let asset: TrackAssetJson = serde_json::from_str(&content).ok()?;
+    if asset.centerline.len() < 3 {
+        return None;
+    }
+    let rotation = asset.rotation_deg.unwrap_or(0.0);
+    Some(build_geometry(session_key, &asset.centerline, rotation))
+}
+
+fn build_geometry(
+    session_key: i64,
+    centerline: &[(f64, f64)],
+    rotation_deg: f64,
+) -> TrackGeometry {
+    let raw = centerline
         .iter()
         .map(|(x, y)| TrackPoint {
             x: *x,
@@ -67,6 +94,11 @@ fn build_geometry(session_key: i64, centerline: &[(f64, f64)]) -> TrackGeometry 
             relative_distance: 0.0,
         })
         .collect::<Vec<_>>();
+    let mut points =
+        super::track_geometry_math::densify_points(&raw, DENSIFIED_POINT_COUNT);
+    if rotation_deg != 0.0 {
+        rotate_points(&mut points, rotation_deg);
+    }
     super::track_geometry_math::apply_distances(&mut points);
     let (inner_edge, outer_edge) =
         super::track_geometry_math::display_edges_with_width(&points, TRACK_WIDTH);
@@ -92,6 +124,30 @@ fn build_geometry(session_key: i64, centerline: &[(f64, f64)]) -> TrackGeometry 
     }
 }
 
+fn rotate_points(points: &mut [TrackPoint], rotation_deg: f64) {
+    if points.is_empty() {
+        return;
+    }
+    let (mut cx, mut cy) = (0.0f64, 0.0f64);
+    for point in points.iter() {
+        cx += point.x;
+        cy += point.y;
+    }
+    cx /= points.len() as f64;
+    cy /= points.len() as f64;
+
+    let rad = rotation_deg.to_radians();
+    let cos = rad.cos();
+    let sin = rad.sin();
+
+    for point in points.iter_mut() {
+        let dx = point.x - cx;
+        let dy = point.y - cy;
+        point.x = dx * cos - dy * sin + cx;
+        point.y = dx * sin + dy * cos + cy;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,9 +158,25 @@ mod tests {
         assert_eq!(geometry.source, TrackGeometrySource::CuratedStatic);
         assert_eq!(geometry.quality, TrackGeometryQuality::Ready);
         assert_eq!(geometry.map_mode, MapMode::Projected);
-        assert!(geometry.centerline.len() > 20);
+        assert!(geometry.centerline.len() >= DENSIFIED_POINT_COUNT);
         assert!(geometry.inner_edge.len() == geometry.centerline.len());
         assert!(geometry.outer_edge.len() == geometry.centerline.len());
         assert!(geometry.circuit_length.unwrap() > 1_000.0);
+    }
+
+    #[test]
+    fn unknown_session_returns_none() {
+        assert!(curated_geometry(99999).is_none());
+    }
+
+    #[test]
+    fn rotate_points_preserves_count() {
+        let mut pts = vec![
+            TrackPoint { x: 1.0, y: 0.0, z: None, cumulative_distance: 0.0, relative_distance: 0.0 },
+            TrackPoint { x: 2.0, y: 0.0, z: None, cumulative_distance: 0.0, relative_distance: 0.0 },
+            TrackPoint { x: 3.0, y: 0.0, z: None, cumulative_distance: 0.0, relative_distance: 0.0 },
+        ];
+        rotate_points(&mut pts, 90.0);
+        assert_eq!(pts.len(), 3);
     }
 }

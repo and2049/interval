@@ -321,6 +321,28 @@ async fn public_replay_stream_emits_v1_metadata_snapshots_events_and_end() {
         .all(|snapshot| snapshot.get("positions").is_none()));
 }
 
+#[tokio::test]
+async fn public_replay_stream_starts_from_requested_frame() {
+    let app = seeded_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/9839/replay/stream?from=70&speed=16")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let snapshots = sse_payloads(&text, "snapshot");
+
+    assert_eq!(snapshots[0]["cursor"]["t"], 60.0);
+}
+
 async fn seeded_router() -> Router {
     let pool = storage::connect("sqlite::memory:").await.unwrap();
     storage::migrate(&pool).await.unwrap();

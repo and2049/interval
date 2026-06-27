@@ -1,3 +1,4 @@
+import { createMemo } from "solid-js";
 import type { ReplayEvent, ReplaySnapshot } from "../../../shared/types/api";
 import { DerivedMetricsPanel } from "./DerivedMetricsPanel";
 import { EventTimelinePanel } from "./EventTimelinePanel";
@@ -10,16 +11,20 @@ export function SidePanels(props: {
   eventsLoading?: boolean;
   eventsError?: unknown;
 }) {
+  const raceControl = createMemo(() => props.snapshot.race_control);
+  const weather = createMemo(() => props.snapshot.weather);
+  const cursorT = createMemo(() => props.snapshot.cursor.t);
+
   return (
     <div class="grid h-full min-h-0 grid-rows-[minmax(6rem,1fr)_minmax(6rem,1fr)_7rem_minmax(6rem,1fr)] gap-2">
-      <RaceControlPanel raceControl={props.snapshot.race_control} />
+      <RaceControlPanel raceControl={raceControl()} />
       <EventTimelinePanel
         events={props.events}
-        t={props.snapshot.cursor.t}
+        t={cursorT()}
         loading={props.eventsLoading}
         error={props.eventsError}
       />
-      <WeatherPanel weather={props.snapshot.weather} />
+      <WeatherPanel weather={weather()} />
       <DerivedMetricsPanel snapshot={props.snapshot} />
     </div>
   );

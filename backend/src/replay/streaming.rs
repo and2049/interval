@@ -7,7 +7,7 @@ pub struct ReplayFrameWindow {
 }
 
 pub fn frame_window(metadata: &ReplayMetadata, frame_index: i64) -> ReplayFrameWindow {
-    let frame_step = metadata.frame_step_seconds.max(1.0);
+    let frame_step = metadata.frame_step_seconds.max(0.001);
     let t = metadata.min_t + frame_index as f64 * frame_step;
     let previous_t = if frame_index == 0 {
         f64::NEG_INFINITY
@@ -37,13 +37,13 @@ mod tests {
 
     #[test]
     fn frame_window_uses_metadata_cadence() {
-        let metadata = metadata(5.0);
+        let metadata = metadata(0.5);
 
         assert_eq!(
             frame_window(&metadata, 3),
             ReplayFrameWindow {
-                t: 15.0,
-                previous_t: 10.0
+                t: 1.5,
+                previous_t: 1.0
             }
         );
     }

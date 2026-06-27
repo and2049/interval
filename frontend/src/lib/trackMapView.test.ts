@@ -4,11 +4,13 @@ import type {
   TrackGeometry,
   TrackPositionSample
 } from "../../../shared/types/api";
+import { createTrackPointLookup } from "./trackGeometry";
 import {
   displayTrackPoint,
   distanceMarkers,
   driverDots,
   hasRealTrackGeometry,
+  interpolateTrackPositions,
   startFinishLine,
   trackMapPlaceholder,
   trackMapRenderMode
@@ -85,6 +87,7 @@ describe("driverDots", () => {
       color: "#3671C6",
       driver_number: 1,
       isLeader: true,
+      showCode: true,
       source: "projected",
       quality: "projected",
       label: "VER: projected/projected",
@@ -92,8 +95,29 @@ describe("driverDots", () => {
     });
     expect(dots[1]).toMatchObject({
       code: "NOR",
-      isLeader: false
+      isLeader: false,
+      showCode: false
     });
+  });
+
+  test("shows compact labels only for the top three timing rows", () => {
+    const dots = driverDots(
+      [position(1, 0, 0), position(2, 0, 0), position(3, 0, 0), position(4, 0, 0)],
+      [
+        row(1, "VER", "3671C6"),
+        row(2, "LEC", "E80020"),
+        row(3, "RUS", "27F4D2"),
+        row(4, "NOR", "FF8000")
+      ],
+      geometry()
+    );
+
+    expect(dots.map((dot) => [dot.code, dot.showCode])).toEqual([
+      ["VER", true],
+      ["LEC", true],
+      ["RUS", true],
+      ["NOR", false]
+    ]);
   });
 
   test("includes stale source metadata in the accessible dot label", () => {
@@ -104,6 +128,45 @@ describe("driverDots", () => {
     );
 
     expect(dots[0].label).toBe("NOR: interpolated/interpolated, 12s stale");
+  });
+});
+
+describe("interpolateTrackPositions", () => {
+  test("interpolates driver coordinates between fetched replay frames", () => {
+    const positions = interpolateTrackPositions(
+      [position(1, 0, 0)],
+      [position(1, 100, 50)],
+      0.25
+    );
+
+    expect(positions[0]).toMatchObject({
+      driver_number: 1,
+      x: 25,
+      y: 12.5
+    });
+  });
+
+  test("uses relative distance on real geometry so projected dots stay on the centerline", () => {
+    const trackGeometry = geometry();
+    const positions = interpolateTrackPositions(
+      [{ ...position(1, 0, 0), relative_distance: 0.9 }],
+      [{ ...position(1, 0, 0), relative_distance: 0.1 }],
+      0.5,
+      trackGeometry,
+      createTrackPointLookup(trackGeometry.centerline)
+    );
+
+    expect(positions[0].relative_distance).toBeCloseTo(0);
+    expect(positions[0]).toMatchObject({
+      x: 0,
+      y: 0
+    });
+  });
+
+  test("returns the target positions when no previous frame is available", () => {
+    const target = [position(1, 100, 50)];
+
+    expect(interpolateTrackPositions(undefined, target, 0.5)).toBe(target);
   });
 });
 

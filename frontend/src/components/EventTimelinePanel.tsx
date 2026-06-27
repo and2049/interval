@@ -1,4 +1,4 @@
-import { For, Show } from "solid-js";
+import { Index, Show } from "solid-js";
 import type { ReplayEvent } from "../../../shared/types/api";
 import { formatEventClock } from "../lib/formatters";
 import {
@@ -32,19 +32,19 @@ export function EventTimelinePanel(props: {
           when={state() === "ready"}
           fallback={<EmptyState label={eventFeedEmptyLabel(state())} />}
         >
-          <For each={rows()}>
+          <Index each={rows()}>
             {(event) => (
               <div class="mb-2 border-b border-line/70 pb-2">
                 <div class="flex items-center justify-between gap-2 text-slate-500">
-                  <span>{formatEventClock(event.t)}</span>
-                  <span class={eventSeverityClass(event.severity)}>
-                    {eventKindLabel(event.kind)}
+                  <span>{formatEventClock(event().t)}</span>
+                  <span class={eventSeverityClass(event().severity)}>
+                    {eventKindLabel(event().kind)}
                   </span>
                 </div>
-                <div class="mt-0.5 text-slate-100">{event.message}</div>
+                <div class="mt-0.5 text-slate-100">{event().message}</div>
               </div>
             )}
-          </For>
+          </Index>
         </Show>
       </div>
     </Panel>

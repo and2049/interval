@@ -3,7 +3,7 @@ use crate::{
     normalization::RaceData,
 };
 
-const SNAPSHOT_STEP_SECONDS: f64 = 5.0;
+const SNAPSHOT_STEP_SECONDS: f64 = 0.5;
 const DEFAULT_DURATION_SECONDS: f64 = 7_200.0;
 
 pub struct GeneratedReplay {
@@ -26,25 +26,25 @@ pub fn generate_replay(mut session: Session, data: RaceData) -> anyhow::Result<G
     let track_geometry =
         super::track_geometry_builder::build_track_geometry(session.session_key, &data.locations);
     let max_t = max_time(&data).unwrap_or(DEFAULT_DURATION_SECONDS);
+    let index = super::indexed_data::ReplayDataIndex::new(&data);
     let mut snapshots = Vec::new();
     let mut frame_index = 0_i64;
-    let mut t = 0.0;
-    while t <= max_t {
-        snapshots.push(super::snapshot_builder::build_snapshot(
+    while frame_index as f64 * SNAPSHOT_STEP_SECONDS <= max_t + f64::EPSILON {
+        let t = frame_time(frame_index);
+        snapshots.push(super::snapshot_builder::build_indexed_snapshot(
             &session,
-            &data,
+            &index,
             &track_geometry,
             t,
             frame_index,
         ));
         frame_index += 1;
-        t += SNAPSHOT_STEP_SECONDS;
     }
 
     if snapshots.is_empty() {
-        snapshots.push(super::snapshot_builder::build_snapshot(
+        snapshots.push(super::snapshot_builder::build_indexed_snapshot(
             &session,
-            &data,
+            &index,
             &track_geometry,
             0.0,
             0,
@@ -68,6 +68,11 @@ pub fn generate_replay(mut session: Session, data: RaceData) -> anyhow::Result<G
         session,
         track_geometry,
     })
+}
+
+fn frame_time(frame_index: i64) -> f64 {
+    let t = frame_index as f64 * SNAPSHOT_STEP_SECONDS;
+    (t * 1_000.0).round() / 1_000.0
 }
 
 fn max_time(data: &RaceData) -> Option<f64> {
@@ -170,6 +175,8 @@ mod tests {
 
         let generated = generate_replay(session, data).unwrap();
         assert_eq!(generated.metadata.session.total_laps, 1);
+        assert_eq!(generated.metadata.frame_step_seconds, SNAPSHOT_STEP_SECONDS);
+        assert_eq!(generated.snapshots[1].cursor.t, SNAPSHOT_STEP_SECONDS);
         assert!(generated.snapshots.len() > 1);
         assert_eq!(generated.snapshots[1].timing.rows[0].driver.code, "NOR");
     }

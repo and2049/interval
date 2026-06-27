@@ -1,6 +1,6 @@
 use crate::domain::{TrackBounds, TrackGeometry, TrackPoint};
 
-const TRACK_WIDTH: f64 = 180.0;
+const TRACK_WIDTH: f64 = 15.0;
 
 pub(crate) fn point_at_relative_distance(
     geometry: &TrackGeometry,
@@ -31,6 +31,56 @@ pub(crate) fn point_at_relative_distance(
         }
     }
     geometry.centerline.first().cloned()
+}
+
+pub(crate) fn densify_points(points: &[TrackPoint], target_count: usize) -> Vec<TrackPoint> {
+    if points.len() < 2 {
+        return points.to_vec();
+    }
+    if target_count == points.len() {
+        return points.to_vec();
+    }
+    if target_count < 2 {
+        return vec![points[0].clone()];
+    }
+
+    let mut cumdist = vec![0.0f64];
+    let mut total = 0.0;
+    for idx in 1..points.len() {
+        total += distance(&points[idx - 1], &points[idx]);
+        cumdist.push(total);
+    }
+    if total <= 0.0 {
+        return points.to_vec();
+    }
+
+    let step = total / (target_count - 1) as f64;
+    let mut result = Vec::with_capacity(target_count);
+
+    for i in 0..target_count {
+        let target = i as f64 * step;
+        let seg = cumdist
+            .partition_point(|&d| d < target)
+            .saturating_sub(1)
+            .min(cumdist.len() - 2);
+        let span = (cumdist[seg + 1] - cumdist[seg]).max(f64::EPSILON);
+        let ratio = ((target - cumdist[seg]) / span).clamp(0.0, 1.0);
+        let a = &points[seg];
+        let b = &points[seg + 1];
+        result.push(TrackPoint {
+            x: a.x + (b.x - a.x) * ratio,
+            y: a.y + (b.y - a.y) * ratio,
+            z: match (a.z, b.z) {
+                (Some(az), Some(bz)) => Some(az + (bz - az) * ratio),
+                (Some(z), None) | (None, Some(z)) => Some(z),
+                (None, None) => None,
+            },
+            cumulative_distance: 0.0,
+            relative_distance: 0.0,
+        });
+    }
+
+    result
 }
 
 pub(crate) fn apply_distances(points: &mut [TrackPoint]) {
@@ -146,4 +196,50 @@ fn distance(a: &TrackPoint, b: &TrackPoint) -> f64 {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
     (dx * dx + dy * dy).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pt(x: f64, y: f64) -> TrackPoint {
+        TrackPoint {
+            x,
+            y,
+            z: None,
+            cumulative_distance: 0.0,
+            relative_distance: 0.0,
+        }
+    }
+
+    #[test]
+    fn densify_produces_requested_count() {
+        let input = vec![pt(0.0, 0.0), pt(100.0, 0.0), pt(100.0, 100.0)];
+        let result = densify_points(&input, 50);
+        assert_eq!(result.len(), 50);
+    }
+
+    #[test]
+    fn densify_preserves_endpoints() {
+        let input = vec![pt(0.0, 0.0), pt(100.0, 0.0), pt(100.0, 100.0)];
+        let result = densify_points(&input, 10);
+        assert!((result[0].x - 0.0).abs() < 0.01 && (result[0].y - 0.0).abs() < 0.01);
+        assert!((result[9].x - 100.0).abs() < 0.01 && (result[9].y - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn densify_downsamples_to_target_count() {
+        let input = vec![pt(0.0, 0.0), pt(10.0, 0.0), pt(20.0, 0.0), pt(30.0, 0.0)];
+        let result = densify_points(&input, 2);
+        assert_eq!(result.len(), 2);
+        assert!((result[0].x - 0.0).abs() < 0.01);
+        assert!((result[1].x - 30.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn densify_returns_single_point_for_target_one() {
+        let input = vec![pt(0.0, 0.0), pt(10.0, 0.0)];
+        let result = densify_points(&input, 1);
+        assert_eq!(result.len(), 1);
+    }
 }

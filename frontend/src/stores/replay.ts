@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createResource, createSignal, onCleanup } from "solid-js";
+import { createEffect, createResource, createSignal, onCleanup } from "solid-js";
 import { api } from "../lib/api";
 import {
   MVP_HISTORICAL_SESSION_KEY,
@@ -18,6 +18,9 @@ import {
   snapshotRequest,
   shouldReloadSession
 } from "../lib/replayPlayback";
+import type { ReplaySnapshot } from "../../../shared/types/api";
+
+const PLAYBACK_TICK_MS = 100;
 
 export function createReplayStore() {
   const [sessionKey, setSessionKey] = createSignal(
@@ -26,19 +29,12 @@ export function createReplayStore() {
   const [playing, setPlaying] = createSignal(false);
   const [speed, setSpeed] = createSignal(1);
   const [time, setTime] = createSignal(0);
+  const [streamStartTime, setStreamStartTime] = createSignal(0);
+  const [currentSnapshot, setCurrentSnapshot] = createSignal<ReplaySnapshot>();
+  const [snapshotLoading, setSnapshotLoading] = createSignal(false);
+  const [snapshotError, setSnapshotError] = createSignal<unknown>();
 
   const [metadata, { refetch: refetchMetadata }] = createResource(sessionKey, api.metadata);
-  const snapshotSource = createMemo(
-    () => snapshotRequest(sessionKey(), metadata(), time()),
-    undefined,
-    {
-      equals: (previous, next) => previous?.key === next?.key && previous?.t === next?.t
-    }
-  );
-  const [snapshot, { refetch }] = createResource(
-    snapshotSource,
-    ({ key, t }) => api.snapshot(key, t)
-  );
   const [trackGeometry, { refetch: refetchTrackGeometry }] = createResource(
     () => replayResourceSessionKey(sessionKey(), metadata()),
     api.trackGeometry
@@ -72,6 +68,27 @@ export function createReplayStore() {
     );
 
   let lastTick = performance.now();
+  let snapshotRequestId = 0;
+  let stream: EventSource | undefined;
+
+  async function loadSnapshot(t = time()) {
+    const request = snapshotRequest(sessionKey(), metadata(), t);
+    if (!request) return;
+    const requestId = ++snapshotRequestId;
+    setSnapshotLoading(true);
+    setSnapshotError(undefined);
+    try {
+      const loaded = await api.snapshot(request.key, request.t);
+      if (requestId === snapshotRequestId && loaded.cursor.session_key === sessionKey()) {
+        setCurrentSnapshot(loaded);
+      }
+    } catch (error) {
+      if (requestId === snapshotRequestId) setSnapshotError(error);
+    } finally {
+      if (requestId === snapshotRequestId) setSnapshotLoading(false);
+    }
+  }
+
   const timer = window.setInterval(() => {
     const now = performance.now();
     const elapsed = (now - lastTick) / 1000;
@@ -86,11 +103,12 @@ export function createReplayStore() {
     });
     if (next.time !== time()) setTime(next.time);
     if (next.playing !== playing()) setPlaying(next.playing);
-  }, 250);
+  }, PLAYBACK_TICK_MS);
 
   createEffect(() => {
-    if (activeMetadata() && time() === 0) {
-      void refetch();
+    const meta = activeMetadata();
+    if (meta && !playing()) {
+      void loadSnapshot(time());
     }
   });
 
@@ -99,7 +117,57 @@ export function createReplayStore() {
     if (session) writeStoredSessionKey(session.session_key);
   });
 
-  onCleanup(() => window.clearInterval(timer));
+  createEffect(() => {
+    const meta = activeMetadata();
+    if (!meta || !playing()) {
+      stream?.close();
+      stream = undefined;
+      return;
+    }
+
+    stream?.close();
+    const source = new EventSource(
+      api.streamUrl(meta.session.session_key, streamStartTime(), speed())
+    );
+    stream = source;
+    setSnapshotLoading(true);
+    setSnapshotError(undefined);
+
+    source.addEventListener("snapshot", (event) => {
+      try {
+        const snapshot = JSON.parse((event as MessageEvent).data) as ReplaySnapshot;
+        if (snapshot.cursor.session_key !== sessionKey()) return;
+        setCurrentSnapshot(snapshot);
+        setSnapshotLoading(false);
+      } catch (error) {
+        setSnapshotError(error);
+      }
+    });
+    source.addEventListener("error", () => {
+      if (source.readyState === EventSource.CLOSED) {
+        setSnapshotError(new Error("Replay stream disconnected."));
+      }
+    });
+    source.addEventListener("end", () => {
+      setPlaying(false);
+      source.close();
+      if (stream === source) stream = undefined;
+    });
+  });
+
+  onCleanup(() => {
+    window.clearInterval(timer);
+    stream?.close();
+  });
+
+  const snapshot = Object.assign(() => currentSnapshot(), {
+    get loading() {
+      return snapshotLoading();
+    },
+    get error() {
+      return snapshotError();
+    }
+  });
 
   return {
     sessionKey,
@@ -117,22 +185,38 @@ export function createReplayStore() {
     time,
     playing,
     speed,
-    setPlaying,
+    setPlaying: (nextPlaying: boolean | ((current: boolean) => boolean)) => {
+      const resolved =
+        typeof nextPlaying === "function" ? nextPlaying(playing()) : nextPlaying;
+      if (resolved) setStreamStartTime(time());
+      setPlaying(resolved);
+    },
     setSpeed: (nextSpeed: number | ((current: number) => number)) => {
-      setSpeed((current) =>
-        normalizeReplaySpeed(typeof nextSpeed === "function" ? nextSpeed(current) : nextSpeed)
+      const normalized = normalizeReplaySpeed(
+        typeof nextSpeed === "function" ? nextSpeed(speed()) : nextSpeed
       );
+      setSpeed(normalized);
+      setStreamStartTime(time());
     },
     seek: (nextTime: number) => {
-      setTime(clampReplayTime(nextTime, activeMetadata()?.max_t ?? Number.POSITIVE_INFINITY));
+      const clamped = clampReplayTime(
+        nextTime,
+        activeMetadata()?.max_t ?? Number.POSITIVE_INFINITY
+      );
+      setTime(clamped);
+      setStreamStartTime(clamped);
+      void loadSnapshot(clamped);
     },
     openSession: (key: number) => {
       setPlaying(false);
       setTime(0);
+      setStreamStartTime(0);
+      setCurrentSnapshot(undefined);
+      setSnapshotError(undefined);
       writeStoredSessionKey(key);
       if (shouldReloadSession(sessionKey(), key)) {
         void refetchMetadata();
-        void refetch();
+        void loadSnapshot(0);
         void refetchTrackGeometry();
         void refetchEvents();
         return;

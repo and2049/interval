@@ -1,6 +1,6 @@
-import { For } from "solid-js";
-import type { ReplaySnapshot, TrackGeometry } from "../../../shared/types/api";
-import { closedRoadPath, pointsToPath, scalePoint } from "../lib/trackGeometry";
+import { For, Index, Show } from "solid-js";
+import type { ReplaySnapshot, TrackGeometry, TrackPositionSample } from "../../../shared/types/api";
+import { pointsToPath, scalePoint } from "../lib/trackGeometry";
 import {
   distanceMarkers,
   driverDots,
@@ -14,6 +14,7 @@ export function TrackMapSvg(props: {
   snapshot: ReplaySnapshot;
   geometry?: TrackGeometry;
   geometryError?: unknown;
+  positions?: TrackPositionSample[];
 }) {
   const renderMode = () =>
     trackMapRenderMode(props.snapshot.track.map_mode, props.geometry, {
@@ -22,7 +23,7 @@ export function TrackMapSvg(props: {
   const dots = () =>
     renderMode() === "pending" || renderMode() === "error"
       ? []
-      : driverDots(props.snapshot.track.positions, props.snapshot.timing.rows, props.geometry);
+      : driverDots(props.positions ?? props.snapshot.track.positions, props.snapshot.timing.rows, props.geometry);
 
   return (
     <svg class="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">
@@ -33,34 +34,36 @@ export function TrackMapSvg(props: {
       ) : (
         <PendingGeometry mode={renderMode()} />
       )}
-      <For each={dots()}>
+      <Index each={dots()}>
         {(dot) => {
-          const point = dot.point;
+          const point = () => dot().point;
           return (
             <g>
-              <title>{dot.label}</title>
-              <ShowLeaderHalo show={dot.isLeader} x={point.x} y={point.y} />
+              <title>{dot().label}</title>
+              <ShowLeaderHalo show={dot().isLeader} x={point().x} y={point().y} />
               <circle
-                cx={point.x}
-                cy={point.y}
-                r={dot.isLeader ? "2.8" : "2.3"}
-                fill={dot.color}
+                cx={point().x}
+                cy={point().y}
+                r={dot().isLeader ? "2.05" : "1.55"}
+                fill={dot().color}
                 stroke="#f7fbff"
-                stroke-width="0.5"
+                stroke-width="0.35"
               />
-              <text
-                x={point.x + 2.8}
-                y={point.y + 1.3}
-                fill="#e7ecf0"
-                font-size="3"
-                font-family="monospace"
-              >
-                {dot.code}
-              </text>
+              <Show when={dot().showCode}>
+                <text
+                  x={point().x + 2.25}
+                  y={point().y + 0.9}
+                  fill="#e7ecf0"
+                  font-size="2.35"
+                  font-family="monospace"
+                >
+                  {dot().code}
+                </text>
+              </Show>
             </g>
           );
         }}
-      </For>
+      </Index>
     </svg>
   );
 }
@@ -82,27 +85,28 @@ function PendingGeometry(props: { mode: "pending" | "error" | "real" | "schemati
 }
 
 function RealGeometry(props: { geometry: TrackGeometry }) {
+  const centerlinePath = () => pointsToPath(props.geometry.centerline, props.geometry.bounds);
   return (
     <>
       <path
-        d={closedRoadPath(props.geometry.outer_edge, props.geometry.inner_edge, props.geometry.bounds)}
-        fill="#20262c"
-        stroke="none"
-      />
-      <path
-        d={pointsToPath(props.geometry.outer_edge, props.geometry.bounds)}
+        d={centerlinePath()}
         fill="none"
-        stroke="#d4d7cc"
-        stroke-width="0.9"
+        stroke="#20262c"
+        stroke-width="2.6"
+        stroke-linejoin="round"
+        stroke-linecap="round"
       />
       <path
-        d={pointsToPath(props.geometry.inner_edge, props.geometry.bounds)}
+        d={centerlinePath()}
         fill="none"
-        stroke="#d4d7cc"
-        stroke-width="0.9"
+        stroke="#3a4250"
+        stroke-width="2.6"
+        stroke-linejoin="round"
+        stroke-linecap="round"
+        opacity="0.5"
       />
       <path
-        d={pointsToPath(props.geometry.centerline, props.geometry.bounds)}
+        d={centerlinePath()}
         fill="none"
         stroke="#5b6571"
         stroke-dasharray="1.4 1.4"
@@ -179,6 +183,6 @@ function SchematicGeometry() {
 
 function ShowLeaderHalo(props: { show: boolean; x: number; y: number }) {
   return props.show ? (
-    <circle cx={props.x} cy={props.y} r="4.2" fill="none" stroke="#f5d547" stroke-width="0.55" />
+    <circle cx={props.x} cy={props.y} r="3.05" fill="none" stroke="#f5d547" stroke-width="0.45" />
   ) : null;
 }

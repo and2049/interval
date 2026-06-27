@@ -109,6 +109,12 @@ describe("api parameter validation", () => {
       expect(calls).toEqual(["/api/sessions/9472/replay/snapshot?t=12.346"]);
     });
   });
+
+  test("formats stream urls with start time and playback speed", () => {
+    expect(api.streamUrl(9472, 12.3456, 2)).toBe(
+      "/api/sessions/9472/replay/stream?from=12.346&speed=2.000"
+    );
+  });
 });
 
 function ingestResponse(overrides: { status?: "ready" | "failed" } = {}) {
