@@ -208,7 +208,7 @@ describe("replayLoadMessage", () => {
         sessionKey: 9472,
         preferredHistoricalSessionKey: 9472
       })
-    ).toBe("Bahrain replay is not cached yet. Choose INGEST + OPEN to fetch OpenF1 data.");
+    ).toBe("Bahrain replay is not cached yet. Choose INGEST + OPEN to fetch FastF1 data.");
     expect(
       replayLoadMessage({
         metadataError: "404 Not Found",
@@ -264,6 +264,7 @@ function metadata(
     drivers: [],
     min_t: 0,
     max_t: options.maxT ?? 0,
+    race_start_t: 0,
     generated_at: "",
     data_sources: [],
     available_channels: {

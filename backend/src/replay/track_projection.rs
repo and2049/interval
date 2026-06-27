@@ -144,7 +144,11 @@ mod tests {
                 z: None,
             })
             .collect::<Vec<_>>();
-        let geometry = super::super::track_geometry_builder::build_track_geometry(42, &samples);
+        let geometry = super::super::track_geometry_builder::build_track_geometry(
+            42,
+            &samples,
+            crate::domain::TrackGeometrySource::OpenF1Location,
+        );
         let relative =
             crate::replay::track_geometry_math::project_relative_distance(&geometry, 95.0, 2.0)
                 .unwrap();
@@ -156,6 +160,7 @@ mod tests {
         let geometry = super::super::track_geometry_builder::build_track_geometry(
             crate::replay::BAHRAIN_SESSION_KEY,
             &[],
+            crate::domain::TrackGeometrySource::OpenF1Location,
         );
         let position = projected_position(&geometry, 1, 0.25).unwrap();
         assert_eq!(position.source, TrackPositionSource::Projected);

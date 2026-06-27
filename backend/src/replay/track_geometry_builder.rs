@@ -14,6 +14,7 @@ const MAX_CENTERLINE_POINTS: usize = 240;
 pub(crate) fn build_track_geometry(
     session_key: i64,
     locations: &[LocationRecord],
+    location_source: TrackGeometrySource,
 ) -> TrackGeometry {
     let mut driver_counts = HashMap::<i32, usize>::new();
     for sample in locations {
@@ -52,7 +53,7 @@ pub(crate) fn build_track_geometry(
         centerline: points,
         inner_edge,
         outer_edge,
-        source: TrackGeometrySource::OpenF1Location,
+        source: location_source,
         quality: TrackGeometryQuality::Ready,
         map_mode: MapMode::Gps,
         circuit_length,
@@ -112,7 +113,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let geometry = build_track_geometry(42, &samples);
+        let geometry = build_track_geometry(42, &samples, TrackGeometrySource::OpenF1Location);
         assert_eq!(geometry.quality, TrackGeometryQuality::Ready);
         assert!(geometry.centerline.len() >= MIN_GEOMETRY_POINTS);
         assert!(geometry.circuit_length.unwrap() > 0.0);
@@ -120,13 +121,17 @@ mod tests {
 
     #[test]
     fn rejects_insufficient_geometry_samples() {
-        let geometry = build_track_geometry(42, &[]);
+        let geometry = build_track_geometry(42, &[], TrackGeometrySource::OpenF1Location);
         assert_eq!(geometry.quality, TrackGeometryQuality::Schematic);
     }
 
     #[test]
     fn uses_curated_bahrain_geometry_when_location_is_missing() {
-        let geometry = build_track_geometry(crate::replay::BAHRAIN_SESSION_KEY, &[]);
+        let geometry = build_track_geometry(
+            crate::replay::BAHRAIN_SESSION_KEY,
+            &[],
+            TrackGeometrySource::OpenF1Location,
+        );
         assert_eq!(geometry.source, TrackGeometrySource::CuratedStatic);
         assert_eq!(geometry.quality, TrackGeometryQuality::Ready);
         assert_eq!(geometry.map_mode, MapMode::Projected);
@@ -144,8 +149,34 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let geometry = build_track_geometry(crate::replay::BAHRAIN_SESSION_KEY, &samples);
+        let geometry = build_track_geometry(
+            crate::replay::BAHRAIN_SESSION_KEY,
+            &samples,
+            TrackGeometrySource::OpenF1Location,
+        );
         assert_eq!(geometry.source, TrackGeometrySource::OpenF1Location);
+        assert_eq!(geometry.map_mode, MapMode::Gps);
+    }
+
+    #[test]
+    fn labels_fastf1_geometry_when_location_samples_are_usable() {
+        let samples = (0..20)
+            .map(|idx| LocationRecord {
+                t: idx as f64,
+                driver_number: 1,
+                x: idx as f64 * 10.0,
+                y: (idx % 3) as f64,
+                z: None,
+            })
+            .collect::<Vec<_>>();
+
+        let geometry = build_track_geometry(
+            crate::replay::BAHRAIN_SESSION_KEY,
+            &samples,
+            TrackGeometrySource::FastF1Telemetry,
+        );
+
+        assert_eq!(geometry.source, TrackGeometrySource::FastF1Telemetry);
         assert_eq!(geometry.map_mode, MapMode::Gps);
     }
 }

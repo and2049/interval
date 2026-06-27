@@ -83,7 +83,11 @@ async fn ingest_failure_returns_structured_response() {
     let historical = crate::connectors::openf1_historical::HistoricalClient::with_base_url(
         "http://127.0.0.1:1/v1/".parse().unwrap(),
     );
-    let app = router(AppState::new(pool.clone(), historical));
+    let fastf1 = crate::connectors::fastf1_historical::FastF1HistoricalClient::for_test(
+        std::env::current_dir().unwrap(),
+        Some(std::path::PathBuf::from("missing-fastf1-python")),
+    );
+    let app = router(AppState::new_with_fastf1(pool.clone(), historical, fastf1));
 
     let response = app
         .oneshot(
@@ -105,7 +109,7 @@ async fn ingest_failure_returns_structured_response() {
     assert_eq!(payload["generated_snapshots"], 0);
     assert!(payload["error"]
         .as_str()
-        .is_some_and(|message| message.contains("OpenF1 request failed")));
+        .is_some_and(|message| message.contains("FastF1 filesystem error")));
 
     let readiness = storage::list_session_readiness(&pool, 1229)
         .await
@@ -116,7 +120,7 @@ async fn ingest_failure_returns_structured_response() {
     assert!(readiness
         .last_error
         .as_deref()
-        .is_some_and(|message| message.contains("OpenF1 request failed")));
+        .is_some_and(|message| message.contains("FastF1 filesystem error")));
 }
 
 #[tokio::test]

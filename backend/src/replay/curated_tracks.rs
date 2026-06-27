@@ -79,11 +79,7 @@ fn load_asset_geometry(session_key: i64) -> Option<TrackGeometry> {
     Some(build_geometry(session_key, &asset.centerline, rotation))
 }
 
-fn build_geometry(
-    session_key: i64,
-    centerline: &[(f64, f64)],
-    rotation_deg: f64,
-) -> TrackGeometry {
+fn build_geometry(session_key: i64, centerline: &[(f64, f64)], rotation_deg: f64) -> TrackGeometry {
     let raw = centerline
         .iter()
         .map(|(x, y)| TrackPoint {
@@ -94,8 +90,7 @@ fn build_geometry(
             relative_distance: 0.0,
         })
         .collect::<Vec<_>>();
-    let mut points =
-        super::track_geometry_math::densify_points(&raw, DENSIFIED_POINT_COUNT);
+    let mut points = super::track_geometry_math::densify_points(&raw, DENSIFIED_POINT_COUNT);
     if rotation_deg != 0.0 {
         rotate_points(&mut points, rotation_deg);
     }
@@ -172,9 +167,27 @@ mod tests {
     #[test]
     fn rotate_points_preserves_count() {
         let mut pts = vec![
-            TrackPoint { x: 1.0, y: 0.0, z: None, cumulative_distance: 0.0, relative_distance: 0.0 },
-            TrackPoint { x: 2.0, y: 0.0, z: None, cumulative_distance: 0.0, relative_distance: 0.0 },
-            TrackPoint { x: 3.0, y: 0.0, z: None, cumulative_distance: 0.0, relative_distance: 0.0 },
+            TrackPoint {
+                x: 1.0,
+                y: 0.0,
+                z: None,
+                cumulative_distance: 0.0,
+                relative_distance: 0.0,
+            },
+            TrackPoint {
+                x: 2.0,
+                y: 0.0,
+                z: None,
+                cumulative_distance: 0.0,
+                relative_distance: 0.0,
+            },
+            TrackPoint {
+                x: 3.0,
+                y: 0.0,
+                z: None,
+                cumulative_distance: 0.0,
+                relative_distance: 0.0,
+            },
         ];
         rotate_points(&mut pts, 90.0);
         assert_eq!(pts.len(), 3);

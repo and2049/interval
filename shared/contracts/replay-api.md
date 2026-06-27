@@ -1,6 +1,6 @@
 # Replay API Contract
 
-The backend owns OpenF1 ingestion, normalization, caching, replay timeline lookup, and derived metrics. The frontend owns playback controls and renders versioned replay contracts. MVP contract version is `replay.v1`.
+The backend owns historical ingest, normalization, caching, replay timeline lookup, and derived metrics. FastF1 is the primary historical replay source; OpenF1 remains available for discovery, legacy cached rebuilds, and future live data. The frontend owns playback controls and renders versioned replay contracts. MVP contract version is `replay.v1`.
 
 ## Endpoints
 
@@ -39,7 +39,7 @@ Returns race sessions for the selected meeting with replay readiness. MVP scope 
 
 ### `POST /api/sessions/{session_key}/ingest`
 
-Fetches the historical OpenF1 endpoint bundle for a race session, stores raw responses in SQLite, normalizes records, generates replay snapshots, and persists replay metadata/events.
+Fetches the historical FastF1 bundle for a race session, stores raw sections in SQLite, normalizes records, generates replay snapshots, and persists replay metadata/events.
 
 Response:
 
@@ -72,7 +72,7 @@ Response:
 }
 ```
 
-Failure responses keep the same envelope so the frontend can show the error while session readiness records the failed ingest state. OpenF1 fetch failures return `502`, fetch timeouts return `504`, and replay rebuild failures return `500` with `"status": "failed"` and an `"error"` message.
+Failure responses keep the same envelope so the frontend can show the error while session readiness records the failed ingest state. FastF1 fetch/runtime failures return `502`, fetch timeouts return `504`, and replay rebuild failures return `500` with `"status": "failed"` and an `"error"` message.
 
 The curated MVP fixture is the 2024 Bahrain Grand Prix race (`session_key=9472`). The seeded Abu Dhabi fixture (`session_key=9839`) remains an offline demo and is marked `is_demo: true` in session readiness.
 

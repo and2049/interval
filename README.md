@@ -2,11 +2,11 @@
 
 Replay-first F1 second-screen dashboard for historical race sessions.
 
-The MVP target is the 2024 Bahrain Grand Prix race (`session_key=9472`) using cached OpenF1 historical data, backend-owned replay snapshots, and a dense engineer-inspired SolidJS dashboard.
+The MVP target is the 2024 Bahrain Grand Prix race (`session_key=9472`) using FastF1 historical replay data cached in SQLite, backend-owned replay snapshots, and a dense engineer-inspired SolidJS dashboard.
 
 ## Current Shape
 
-- `backend/`: Rust API service with Axum, SQLite, OpenF1 ingestion, replay generation, track geometry, and SSE streaming.
+- `backend/`: Rust API service with Axum, SQLite, FastF1 historical ingest, OpenF1 discovery, replay generation, track geometry, and SSE streaming.
 - `frontend/`: SolidJS, TypeScript, Vite, and Tailwind dashboard.
 - `shared/`: public replay API contract docs and TypeScript wire types.
 - `infra/`: early deployment notes.
@@ -18,12 +18,12 @@ The reference `docs/f1-race-replay` project is used for modeling ideas only. Thi
 
 The frontend defaults toward `session_key=9472`. If the historical replay is not cached yet, the dashboard stays on Bahrain and prompts the user to choose `INGEST + OPEN`. The seeded demo replay (`session_key=9839`) remains available from the session selector for offline UI development.
 
-For Bahrain, OpenF1 `location` data can be sparse or missing. The backend therefore:
+For historical replays, FastF1 telemetry is the preferred source for driver locations and track geometry. For older cached OpenF1 data, the backend still:
 
-- prefers usable OpenF1 location geometry when present;
+- prefers usable upstream location geometry when present;
 - falls back to curated Bahrain geometry for `session_key=9472`;
 - projects driver dots onto that centerline for the map;
-- keeps timing order based on OpenF1 position/interval data, not map projection.
+- keeps timing order based on normalized position/interval data, not map projection.
 
 Replay payloads use `contract_version: "replay.v1"`. REST snapshots and SSE snapshots share the same nested shape. The frontend advances a local smooth cursor for playback controls, but snapshot requests are quantized to the backend `frame_step_seconds` so the dashboard does not refetch the same persisted frame on every animation tick.
 
@@ -66,7 +66,9 @@ Backend environment variables:
 
 - `DATABASE_URL`: SQLite URL, defaults to `sqlite://interval.db`.
 - `INTERVAL_BIND`: backend bind address, defaults to `127.0.0.1:4000`.
-- `INTERVAL_REBUILD_SESSION_ON_START`: optional session key to rebuild replay artifacts from cached raw OpenF1 data during backend startup. The smoke script uses `9472`.
+- `INTERVAL_REBUILD_SESSION_ON_START`: optional session key to rebuild replay artifacts from cached raw historical data during backend startup. The smoke script uses `9472`.
+- `INTERVAL_FASTF1_PYTHON`: optional Python executable with FastF1 dependencies already installed. If omitted, the backend creates `cache/fastf1-venv` and installs `scripts/fastf1-requirements.txt` on first FastF1 ingest.
+- `INTERVAL_FASTF1_BOOTSTRAP_PYTHON`: optional Python executable used to create the managed FastF1 venv. Defaults to `python`.
 - `RUST_LOG`: tracing filter, defaults to `interval_backend=info,tower_http=info`.
 
 Smoke script parameters:

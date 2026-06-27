@@ -106,6 +106,7 @@ pub struct DriverSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum RankSource {
     OpenF1Position,
+    FastF1Position,
     SessionResult,
     DerivedProgress,
     FallbackGrid,

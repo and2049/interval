@@ -62,7 +62,10 @@ pub(crate) fn build_indexed_snapshot(
 
 fn map_mode(geometry: &TrackGeometry) -> MapMode {
     match (&geometry.quality, &geometry.source) {
-        (TrackGeometryQuality::Ready, TrackGeometrySource::OpenF1Location) => MapMode::Gps,
+        (
+            TrackGeometryQuality::Ready,
+            TrackGeometrySource::OpenF1Location | TrackGeometrySource::FastF1Telemetry,
+        ) => MapMode::Gps,
         (TrackGeometryQuality::Ready, TrackGeometrySource::CuratedStatic) => MapMode::Projected,
         (TrackGeometryQuality::Ready, TrackGeometrySource::Schematic)
         | (TrackGeometryQuality::Schematic | TrackGeometryQuality::Missing, _) => {

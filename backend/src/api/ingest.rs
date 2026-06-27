@@ -15,7 +15,7 @@ pub async fn ingest_session(
     State(state): State<AppState>,
     Path(session_key): Path<i64>,
 ) -> Result<Response, ApiError> {
-    storage::get_session(&state.pool, session_key)
+    let session = storage::get_session(&state.pool, session_key)
         .await?
         .ok_or(ApiError::NotFound)?;
     storage::set_ingest_status(
@@ -27,8 +27,8 @@ pub async fn ingest_session(
     .await?;
 
     let bundle = match tokio::time::timeout(
-        Duration::from_secs(90),
-        state.historical.fetch_race_bundle(session_key),
+        Duration::from_secs(1_000),
+        state.fastf1.fetch_race_bundle(&session),
     )
     .await
     {
@@ -49,7 +49,7 @@ pub async fn ingest_session(
             ));
         }
         Err(_) => {
-            let message = "historical ingest timed out while fetching OpenF1 data";
+            let message = "historical ingest timed out while fetching FastF1 data";
             storage::set_ingest_status(
                 &state.pool,
                 session_key,

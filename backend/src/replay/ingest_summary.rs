@@ -37,7 +37,7 @@ pub fn coverage_warnings(
     }
     for endpoint in coverage.iter().filter(|endpoint| !endpoint.present) {
         warnings.push(format!(
-            "OpenF1 endpoint '{}' returned no rows",
+            "historical data section '{}' returned no rows",
             endpoint.endpoint
         ));
     }

@@ -101,7 +101,7 @@ export function TrackMap(props: {
           positions={positions()}
         />
         <div class="absolute left-3 top-3 grid grid-cols-3 gap-1 font-mono text-[0.68rem]">
-          <span class="border border-line bg-panel px-2 py-1">L{props.snapshot.race_state.lap}</span>
+          <span class="border border-line bg-panel px-2 py-1">{props.snapshot.race_state.lap > 0 ? `L${props.snapshot.race_state.lap}` : "FORM"}</span>
           <span class="border border-line bg-panel px-2 py-1 uppercase">{props.snapshot.race_state.track_status}</span>
           <span class={`border bg-panel px-2 py-1 ${mapModeClass(props.snapshot.track.map_mode)}`}>{displayMode()}</span>
         </div>

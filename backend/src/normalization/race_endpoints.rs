@@ -1,5 +1,5 @@
 use crate::domain::{
-    Driver, Lap, RaceControlMessage, Stint, TrackPositionQuality, TrackPositionSample,
+    Driver, Lap, RaceControlMessage, RankSource, Stint, TrackPositionQuality, TrackPositionSample,
     TrackPositionSource, TyreCompound, WeatherSample,
 };
 use chrono::{DateTime, Utc};
@@ -78,6 +78,7 @@ pub(super) fn positions(
             Some(PositionRecord {
                 t,
                 position: row.position.unwrap_or(0),
+                rank_source: RankSource::OpenF1Position,
                 sample: TrackPositionSample {
                     driver_number: row.driver_number,
                     x: row.x.unwrap_or(0.0),

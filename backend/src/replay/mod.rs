@@ -134,6 +134,65 @@ mod tests {
             .is_some());
     }
 
+    #[tokio::test]
+    async fn rebuilds_replay_from_cached_fastf1_bundle() {
+        let pool = storage::connect("sqlite::memory:").await.unwrap();
+        storage::migrate(&pool).await.unwrap();
+        let session = Session {
+            session_key: crate::replay::BAHRAIN_SESSION_KEY,
+            meeting_key: 1229,
+            year: 2024,
+            name: "Race".to_string(),
+            session_type: crate::domain::SessionType::Race,
+            start_time: "2024-03-02T15:00:00Z".to_string(),
+            end_time: "2024-03-02T17:00:00Z".to_string(),
+            total_laps: 57,
+        };
+        storage::upsert_meetings(
+            &pool,
+            &[Meeting {
+                meeting_key: session.meeting_key,
+                year: session.year,
+                name: "Bahrain Grand Prix".to_string(),
+                country: "Bahrain".to_string(),
+                location: "Sakhir".to_string(),
+            }],
+        )
+        .await
+        .unwrap();
+        storage::upsert_sessions(&pool, std::slice::from_ref(&session))
+            .await
+            .unwrap();
+        storage::store_raw_bundle(&pool, &cached_fastf1_bundle(session.session_key))
+            .await
+            .unwrap();
+
+        let build = rebuild_from_cache(&pool, session.session_key)
+            .await
+            .unwrap();
+
+        assert!(build.available_channels.location);
+        assert!(build.available_channels.track_geometry);
+        let metadata = metadata(&pool, session.session_key).await.unwrap().unwrap();
+        assert_eq!(metadata.data_sources[0].name, "fastf1_historical");
+        assert_eq!(
+            metadata.track_geometry.source,
+            crate::domain::TrackGeometrySource::FastF1Telemetry
+        );
+        let snapshot = snapshot_at(&pool, session.session_key, 1.0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            snapshot.track.positions[0].source,
+            crate::domain::TrackPositionSource::Interpolated
+        );
+        assert_eq!(
+            snapshot.timing.rows[0].rank_source,
+            crate::domain::RankSource::FastF1Position
+        );
+    }
+
     fn cached_bundle(session_key: i64) -> Vec<RawEndpoint> {
         let start = "2024-03-02T15:00:00Z";
         vec![
@@ -228,6 +287,68 @@ mod tests {
                     "dns": false,
                     "dsq": false
                 }]),
+            ),
+        ]
+    }
+
+    fn cached_fastf1_bundle(session_key: i64) -> Vec<RawEndpoint> {
+        vec![
+            raw(
+                session_key,
+                "fastf1_drivers",
+                json!([{
+                    "driver_number": 1,
+                    "full_name": "Max Verstappen",
+                    "code": "VER",
+                    "team_colour": "3671C6",
+                    "team_name": "Red Bull Racing"
+                }]),
+            ),
+            raw(
+                session_key,
+                "fastf1_laps",
+                json!([{
+                    "driver_number": 1,
+                    "lap_number": 1,
+                    "t_start": 0.0,
+                    "lap_duration": 90.0,
+                    "sector_1": 18.0,
+                    "sector_2": 34.0,
+                    "sector_3": 22.0
+                }]),
+            ),
+            raw(
+                session_key,
+                "fastf1_positions",
+                json!([
+                    { "t": 0.0, "driver_number": 1, "position": 1 },
+                    { "t": 1.0, "driver_number": 1, "position": 1 }
+                ]),
+            ),
+            raw(
+                session_key,
+                "fastf1_telemetry",
+                json!([
+                    { "t": 0.0, "driver_number": 1, "x": 0.0, "y": 0.0 },
+                    { "t": 2.0, "driver_number": 1, "x": 20.0, "y": 0.0 }
+                ]),
+            ),
+            raw(
+                session_key,
+                "fastf1_geometry",
+                json!({
+                    "centerline": (0..20).map(|idx| json!([idx as f64 * 10.0, (idx % 3) as f64])).collect::<Vec<_>>()
+                }),
+            ),
+            raw(session_key, "fastf1_intervals", json!([])),
+            raw(session_key, "fastf1_pits", json!([])),
+            raw(session_key, "fastf1_track_status", json!([])),
+            raw(session_key, "fastf1_stints", json!([])),
+            raw(session_key, "fastf1_weather", json!([])),
+            raw(
+                session_key,
+                "fastf1_session_result",
+                json!([{ "driver_number": 1, "position": 1 }]),
             ),
         ]
     }

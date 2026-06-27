@@ -5,6 +5,7 @@ use crate::{
 
 pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
     let mut events = Vec::new();
+    let source = event_source(data.source);
     for (idx, event) in data.race_control.iter().enumerate() {
         events.push(ReplayEvent {
             id: format!("race-control-{idx}"),
@@ -19,7 +20,7 @@ pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
             },
             driver_number: None,
             message: event.message.clone(),
-            source: EventSource::OpenF1,
+            source: source.clone(),
             payload: serde_json::to_value(event).unwrap_or(serde_json::Value::Null),
         });
         if event.flag.is_some() {
@@ -30,7 +31,7 @@ pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
                 severity: EventSeverity::Notice,
                 driver_number: None,
                 message: event.flag.clone().unwrap_or_default(),
-                source: EventSource::OpenF1,
+                source: source.clone(),
                 payload: serde_json::to_value(event).unwrap_or(serde_json::Value::Null),
             });
         }
@@ -43,7 +44,7 @@ pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
             severity: EventSeverity::Info,
             driver_number: Some(pit.driver_number),
             message: format!("Driver {} pit stop", pit.driver_number),
-            source: EventSource::OpenF1,
+            source: source.clone(),
             payload: serde_json::json!({
                 "driver_number": pit.driver_number,
                 "lap_number": pit.lap_number,
@@ -56,6 +57,14 @@ pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
     events.extend(super::derived_events::weather_change_events(&data.weather));
     events.sort_by(|a, b| a.t.total_cmp(&b.t).then_with(|| a.id.cmp(&b.id)));
     events
+}
+
+fn event_source(source: crate::normalization::RaceDataSource) -> EventSource {
+    match source {
+        crate::normalization::RaceDataSource::FastF1Historical => EventSource::FastF1,
+        crate::normalization::RaceDataSource::OpenF1Historical => EventSource::OpenF1,
+        crate::normalization::RaceDataSource::Demo => EventSource::System,
+    }
 }
 
 #[cfg(test)]
@@ -72,6 +81,7 @@ mod tests {
     #[test]
     fn includes_derived_stint_leader_and_weather_changes() {
         let data = RaceData {
+            source: crate::normalization::RaceDataSource::OpenF1Historical,
             drivers: vec![],
             laps: vec![lap_record(1, 10, 90.0), lap_record(4, 10, 95.0)],
             intervals: vec![],
@@ -81,6 +91,7 @@ mod tests {
                 position_record(15.0, 4, 1),
             ],
             locations: vec![],
+            geometry_locations: vec![],
             pits: Vec::<PitEvent>::new(),
             race_control: vec![],
             stints: vec![
@@ -149,6 +160,7 @@ mod tests {
         PositionRecord {
             t,
             position,
+            rank_source: crate::domain::RankSource::OpenF1Position,
             sample: TrackPositionSample {
                 driver_number,
                 x: 0.0,

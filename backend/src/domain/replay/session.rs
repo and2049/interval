@@ -17,6 +17,8 @@ pub struct ReplayMetadata {
     pub min_t: f64,
     pub max_t: f64,
     #[serde(default)]
+    pub race_start_t: f64,
+    #[serde(default)]
     pub generated_at: String,
     #[serde(default)]
     pub data_sources: Vec<DataSource>,

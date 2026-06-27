@@ -37,6 +37,15 @@ describe("channelBadges", () => {
     });
   });
 
+  test("marks FastF1 telemetry geometry as GPS and ready", () => {
+    const badges = channelBadges(metadata({ source: "fast_f1_telemetry", trackReady: true }));
+
+    expect(badges.find((badge) => badge.label === "MAP GPS")).toMatchObject({
+      ready: true,
+      tone: "ready"
+    });
+  });
+
   test("keeps unavailable channels visually muted", () => {
     expect(badgeClass("missing")).toContain("text-slate");
   });
@@ -80,11 +89,12 @@ function metadata(options: {
     drivers: [],
     min_t: 0,
     max_t: 0,
+    race_start_t: 0,
     generated_at: "",
     data_sources: [],
     available_channels: {
       timing: true,
-      location: options.source === "open_f1_location",
+      location: options.source === "open_f1_location" || options.source === "fast_f1_telemetry",
       track_geometry: options.trackReady,
       weather: false,
       race_control: false,

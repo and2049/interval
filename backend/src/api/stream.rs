@@ -4,9 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     response::sse::{Event, KeepAlive, Sse},
 };
-use futures_util::{
-    stream::{self, Stream, StreamExt},
-};
+use futures_util::stream::{self, Stream, StreamExt};
 use std::{collections::VecDeque, convert::Infallible, time::Duration};
 
 const SNAPSHOT_PAGE_SIZE: i64 = 200;

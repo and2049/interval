@@ -70,6 +70,7 @@ export function createReplayStore() {
   let lastTick = performance.now();
   let snapshotRequestId = 0;
   let stream: EventSource | undefined;
+  let initializedSessionKey: number | undefined;
 
   async function loadSnapshot(t = time()) {
     const request = snapshotRequest(sessionKey(), metadata(), t);
@@ -115,6 +116,17 @@ export function createReplayStore() {
   createEffect(() => {
     const session = activeMetadata()?.session;
     if (session) writeStoredSessionKey(session.session_key);
+  });
+
+  createEffect(() => {
+    const meta = activeMetadata();
+    if (!meta || playing()) return;
+    if (initializedSessionKey === meta.session.session_key) return;
+    initializedSessionKey = meta.session.session_key;
+    const startT = meta.race_start_t > 0 ? meta.race_start_t : meta.min_t;
+    setTime(startT);
+    setStreamStartTime(startT);
+    void loadSnapshot(startT);
   });
 
   createEffect(() => {
@@ -213,10 +225,10 @@ export function createReplayStore() {
       setStreamStartTime(0);
       setCurrentSnapshot(undefined);
       setSnapshotError(undefined);
+      initializedSessionKey = undefined;
       writeStoredSessionKey(key);
       if (shouldReloadSession(sessionKey(), key)) {
         void refetchMetadata();
-        void loadSnapshot(0);
         void refetchTrackGeometry();
         void refetchEvents();
         return;

@@ -78,10 +78,11 @@ fn demo_metadata(session: &Session, drivers: &[Driver]) -> ReplayMetadata {
         drivers: drivers.to_vec(),
         min_t: 0.0,
         max_t: 180.0,
+        race_start_t: 0.0,
         generated_at: "demo".to_string(),
         data_sources: vec![DataSource {
-            name: "seed_demo".to_string(),
-            mode: "fixture".to_string(),
+            name: "demo".to_string(),
+            mode: "offline".to_string(),
         }],
         available_channels: AvailableChannels {
             timing: true,

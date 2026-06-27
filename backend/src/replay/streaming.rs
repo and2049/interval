@@ -111,6 +111,7 @@ mod tests {
             drivers: vec![],
             min_t: 0.0,
             max_t: 100.0,
+            race_start_t: 0.0,
             generated_at: String::new(),
             data_sources: vec![],
             available_channels: AvailableChannels {

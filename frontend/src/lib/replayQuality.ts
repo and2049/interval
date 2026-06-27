@@ -16,6 +16,7 @@ export function channelBadges(metadata: ReplayMetadata): ChannelBadge[] {
       ready: metadata.available_channels.track_geometry,
       tone: metadata.available_channels.track_geometry
         ? metadata.track_geometry.source === "open_f1_location"
+          || metadata.track_geometry.source === "fast_f1_telemetry"
           ? "ready"
           : "degraded"
         : "missing"
@@ -31,6 +32,7 @@ function mapModeFromGeometry(metadata: ReplayMetadata): MapMode | undefined {
   if (!metadata.available_channels.track_geometry) return undefined;
   switch (metadata.track_geometry.source) {
     case "open_f1_location":
+    case "fast_f1_telemetry":
       return "gps";
     case "curated_static":
       return "projected";

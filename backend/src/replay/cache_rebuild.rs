@@ -21,7 +21,7 @@ pub async fn rebuild_from_cache(
         .ok_or_else(|| anyhow::anyhow!("session {session_key} not found"))?;
     let bundle = storage::load_raw_bundle(pool, session_key).await?;
     if bundle.is_empty() {
-        anyhow::bail!("no cached raw OpenF1 data for session {session_key}");
+        anyhow::bail!("no cached raw historical data for session {session_key}");
     }
 
     let coverage = super::ingest_summary::endpoint_coverage(&bundle);

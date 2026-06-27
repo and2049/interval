@@ -15,6 +15,18 @@ pub fn build_metadata(
     frame_step_seconds: f64,
     total_frames: i64,
 ) -> ReplayMetadata {
+    let race_start_t = data
+        .laps
+        .iter()
+        .map(|lap| lap.t_start)
+        .filter(|t| t.is_finite() && *t >= 0.0)
+        .fold(f64::INFINITY, f64::min);
+    let race_start_t = if race_start_t.is_finite() {
+        race_start_t
+    } else {
+        0.0
+    };
+
     ReplayMetadata {
         contract_version: REPLAY_CONTRACT_VERSION.to_string(),
         session: session.clone(),
@@ -25,11 +37,9 @@ pub fn build_metadata(
         drivers: data.drivers.clone(),
         min_t: 0.0,
         max_t,
+        race_start_t,
         generated_at: Utc::now().to_rfc3339(),
-        data_sources: vec![DataSource {
-            name: "openf1".to_string(),
-            mode: "historical".to_string(),
-        }],
+        data_sources: vec![data_source(data.source)],
         available_channels: available_channels(data, geometry),
         track_geometry: TrackGeometrySummary {
             status: geometry.quality.clone(),
@@ -37,6 +47,23 @@ pub fn build_metadata(
             quality: geometry.quality.clone(),
         },
         endpoints: endpoint_links(session.session_key),
+    }
+}
+
+fn data_source(source: crate::normalization::RaceDataSource) -> DataSource {
+    match source {
+        crate::normalization::RaceDataSource::FastF1Historical => DataSource {
+            name: "fastf1_historical".to_string(),
+            mode: "historical".to_string(),
+        },
+        crate::normalization::RaceDataSource::OpenF1Historical => DataSource {
+            name: "openf1_historical".to_string(),
+            mode: "historical".to_string(),
+        },
+        crate::normalization::RaceDataSource::Demo => DataSource {
+            name: "demo".to_string(),
+            mode: "offline".to_string(),
+        },
     }
 }
 
@@ -80,6 +107,7 @@ mod tests {
             total_laps: 57,
         };
         let data = RaceData {
+            source: crate::normalization::RaceDataSource::OpenF1Historical,
             drivers: vec![crate::domain::Driver {
                 driver_number: 1,
                 code: "VER".to_string(),
@@ -91,6 +119,7 @@ mod tests {
             intervals: vec![],
             positions: vec![],
             locations: vec![],
+            geometry_locations: vec![],
             pits: vec![],
             race_control: vec![],
             stints: vec![],

@@ -46,6 +46,7 @@ pub enum EventSeverity {
 #[serde(rename_all = "snake_case")]
 pub enum EventSource {
     OpenF1,
+    FastF1,
     Derived,
     System,
 }

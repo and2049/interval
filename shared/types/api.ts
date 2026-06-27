@@ -2,10 +2,10 @@ export type SessionType = "race";
 export type SectorStatus = "personal_best" | "overall_best" | "normal" | "unknown";
 export type TyreCompound = "SOFT" | "MEDIUM" | "HARD" | "INTERMEDIATE" | "WET" | "UNKNOWN";
 export type DriverStatus = "on_track" | "pit" | "out";
-export type RankSource = "open_f1_position" | "session_result" | "derived_progress" | "fallback_grid";
+export type RankSource = "open_f1_position" | "fast_f1_position" | "session_result" | "derived_progress" | "fallback_grid";
 export type DerivedMetricKind = "recent_pace" | "stint_delta" | "pit_state";
 export type MetricTrend = "improving" | "stable" | "degrading" | "unknown";
-export type TrackGeometrySource = "open_f1_location" | "curated_static" | "schematic";
+export type TrackGeometrySource = "open_f1_location" | "fast_f1_telemetry" | "curated_static" | "schematic";
 export type TrackGeometryQuality = "ready" | "schematic" | "missing";
 export type DataQuality = "ready" | "real" | "interpolated" | "projected" | "schematic" | "missing" | "stale";
 export type MapMode = "gps" | "projected" | "schematic";
@@ -18,7 +18,7 @@ export type EventKind =
   | "weather_change"
   | "data_gap";
 export type EventSeverity = "info" | "notice" | "warning" | "critical";
-export type EventSource = "open_f1" | "derived" | "system";
+export type EventSource = "open_f1" | "fast_f1" | "derived" | "system";
 export type IngestStatus = "not_ingested" | "fetching" | "normalizing" | "ready" | "failed";
 export type TrackPositionSource = "real" | "interpolated" | "projected" | "schematic";
 export type TrackPositionQuality =
@@ -149,6 +149,7 @@ export interface ReplayMetadata {
   drivers: Driver[];
   min_t: number;
   max_t: number;
+  race_start_t: number;
   generated_at: string;
   data_sources: DataSource[];
   available_channels: AvailableChannels;

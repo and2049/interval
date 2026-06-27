@@ -140,7 +140,7 @@ export function replayLoadMessage(options: {
   if (options.metadataError) {
     if (isMissingReplay(options.metadataError)) {
       return options.sessionKey === options.preferredHistoricalSessionKey
-        ? "Bahrain replay is not cached yet. Choose INGEST + OPEN to fetch OpenF1 data."
+        ? "Bahrain replay is not cached yet. Choose INGEST + OPEN to fetch FastF1 data."
         : "Replay is not cached yet. Choose INGEST + OPEN for this session.";
     }
     return errorText(options.metadataError, "Replay metadata unavailable.");

@@ -1,4 +1,5 @@
 mod discovery;
+mod fastf1_bundle;
 mod location;
 mod race_endpoints;
 mod records;
@@ -6,7 +7,9 @@ mod time;
 
 pub use discovery::{meetings_from_openf1, race_sessions_from_openf1};
 pub use location::{location_samples, LocationRecord};
-pub use records::{IntervalRecord, LapRecord, PitEvent, PositionRecord, RaceData, SessionResult};
+pub use records::{
+    IntervalRecord, LapRecord, PitEvent, PositionRecord, RaceData, RaceDataSource, SessionResult,
+};
 pub(crate) use time::{parse_date, t_since_start};
 
 use crate::{connectors::openf1_historical::RawEndpoint, domain::Session};
@@ -17,6 +20,13 @@ pub fn race_data_from_bundle(
     bundle: &[RawEndpoint],
     session: &Session,
 ) -> anyhow::Result<RaceData> {
+    if bundle
+        .iter()
+        .any(|entry| entry.endpoint.starts_with("fastf1_"))
+    {
+        return fastf1_bundle::race_data_from_bundle(bundle, session);
+    }
+
     let by_endpoint = bundle
         .iter()
         .map(|entry| (entry.endpoint.as_str(), entry.payload.clone()))
@@ -24,6 +34,7 @@ pub fn race_data_from_bundle(
     let session_start = parse_date(&session.start_time);
 
     Ok(RaceData {
+        source: RaceDataSource::OpenF1Historical,
         drivers: race_endpoints::drivers(
             by_endpoint
                 .get("drivers")
@@ -58,6 +69,7 @@ pub fn race_data_from_bundle(
                 .unwrap_or(Value::Array(vec![])),
             session_start,
         )?,
+        geometry_locations: vec![],
         pits: race_endpoints::pits(
             by_endpoint
                 .get("pit")

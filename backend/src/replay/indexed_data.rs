@@ -104,7 +104,7 @@ impl<'a> ReplayDataIndex<'a> {
             .filter_map(|driver| self.latest_lap(driver.driver_number, t))
             .map(|lap| lap.lap.lap_number)
             .max()
-            .unwrap_or(1)
+            .unwrap_or(0)
     }
 
     pub(crate) fn timing_rows(&self, t: f64) -> Vec<DriverSnapshot> {
@@ -117,7 +117,7 @@ impl<'a> ReplayDataIndex<'a> {
                 let interval = self.latest_interval(driver.driver_number, t);
                 let rank_record = self.latest_rank_record(driver.driver_number, t);
                 let result = self.results.get(&driver.driver_number).copied();
-                let lap_number = lap_record.map_or(1, |lap| lap.lap.lap_number);
+                let lap_number = lap_record.map_or(0, |lap| lap.lap.lap_number);
                 let stint = stint_for(&self.data.stints, driver.driver_number, lap_number);
                 let in_pit = self.in_pit_window(driver.driver_number, t);
 
@@ -355,8 +355,8 @@ fn latest_by_time<'a, T>(rows: &[&'a T], t: f64, time: impl Fn(&T) -> f64) -> Op
 }
 
 fn rank_source(rank_record: Option<&PositionRecord>, result: Option<&SessionResult>) -> RankSource {
-    if rank_record.is_some() {
-        RankSource::OpenF1Position
+    if let Some(rank_record) = rank_record {
+        rank_record.rank_source.clone()
     } else if result.and_then(|result| result.position).is_some() {
         RankSource::SessionResult
     } else {
@@ -475,11 +475,13 @@ mod tests {
 
     fn race_data_with_control(race_control: Vec<RaceControlMessage>) -> RaceData {
         RaceData {
+            source: crate::normalization::RaceDataSource::OpenF1Historical,
             drivers: vec![],
             laps: vec![],
             intervals: vec![],
             positions: vec![],
             locations: vec![],
+            geometry_locations: vec![],
             pits: vec![],
             race_control,
             stints: vec![],

@@ -1,4 +1,6 @@
-use crate::connectors::openf1_historical::HistoricalClient;
+use crate::connectors::{
+    fastf1_historical::FastF1HistoricalClient, openf1_historical::HistoricalClient,
+};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -18,11 +20,29 @@ mod stream;
 pub struct AppState {
     pub(crate) pool: SqlitePool,
     pub(crate) historical: HistoricalClient,
+    pub(crate) fastf1: FastF1HistoricalClient,
 }
 
 impl AppState {
     pub fn new(pool: SqlitePool, historical: HistoricalClient) -> Self {
-        Self { pool, historical }
+        Self {
+            pool,
+            historical,
+            fastf1: FastF1HistoricalClient::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_with_fastf1(
+        pool: SqlitePool,
+        historical: HistoricalClient,
+        fastf1: FastF1HistoricalClient,
+    ) -> Self {
+        Self {
+            pool,
+            historical,
+            fastf1,
+        }
     }
 }
 
@@ -80,6 +100,8 @@ pub enum ApiError {
     Storage(#[from] anyhow::Error),
     #[error("historical connector error: {0}")]
     Historical(#[from] crate::connectors::openf1_historical::HistoricalError),
+    #[error("FastF1 historical connector error: {0}")]
+    FastF1Historical(#[from] crate::connectors::fastf1_historical::FastF1HistoricalError),
 }
 
 impl IntoResponse for ApiError {
@@ -87,7 +109,7 @@ impl IntoResponse for ApiError {
         let status = match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::NotFound => StatusCode::NOT_FOUND,
-            ApiError::Historical(_) => StatusCode::BAD_GATEWAY,
+            ApiError::Historical(_) | ApiError::FastF1Historical(_) => StatusCode::BAD_GATEWAY,
             ApiError::Database(_) | ApiError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 

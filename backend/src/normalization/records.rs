@@ -1,17 +1,26 @@
-use crate::domain::{Lap, TrackPositionSample};
+use crate::domain::{Lap, RankSource, TrackPositionSample};
 
 #[derive(Debug, Clone)]
 pub struct RaceData {
+    pub source: RaceDataSource,
     pub drivers: Vec<crate::domain::Driver>,
     pub laps: Vec<LapRecord>,
     pub intervals: Vec<IntervalRecord>,
     pub positions: Vec<PositionRecord>,
     pub locations: Vec<super::LocationRecord>,
+    pub geometry_locations: Vec<super::LocationRecord>,
     pub pits: Vec<PitEvent>,
     pub race_control: Vec<crate::domain::RaceControlMessage>,
     pub stints: Vec<crate::domain::Stint>,
     pub weather: Vec<crate::domain::WeatherSample>,
     pub session_results: Vec<SessionResult>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RaceDataSource {
+    OpenF1Historical,
+    FastF1Historical,
+    Demo,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +41,7 @@ pub struct IntervalRecord {
 pub struct PositionRecord {
     pub t: f64,
     pub position: i32,
+    pub rank_source: RankSource,
     pub sample: TrackPositionSample,
 }
 
