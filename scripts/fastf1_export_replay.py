@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from typing import Any
 
@@ -42,11 +43,132 @@ def color_without_hash(value: Any) -> str | None:
     return str(value).lstrip("#")
 
 
+def normalize_match_text(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).lower()
+    text = re.sub(r"\b(grand prix|gp|formula 1|fia|world championship|202[0-9])\b", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def match_score(needle: str, haystack: str) -> int:
+    if not needle or not haystack:
+        return 0
+    if needle == haystack:
+        return 12
+    if needle in haystack or haystack in needle:
+        return 8
+    needle_tokens = set(needle.split())
+    haystack_tokens = set(haystack.split())
+    if not needle_tokens or not haystack_tokens:
+        return 0
+    overlap = len(needle_tokens & haystack_tokens)
+    if overlap == len(needle_tokens):
+        return 6
+    if overlap > 0:
+        return overlap
+    return 0
+
+
+def resolve_round(
+    year: int,
+    round_number: int | None,
+    event_name: str | None,
+    country: str | None,
+    location: str | None,
+) -> tuple[int, dict[str, Any]]:
+    if round_number is not None:
+        return round_number, {
+            "round": round_number,
+            "event_name": None,
+            "match_method": "provided_round",
+            "match_confidence": 1.0,
+            "warnings": [],
+        }
+
+    schedule = fastf1.get_event_schedule(year)
+    event_query = normalize_match_text(event_name)
+    country_query = normalize_match_text(country)
+    location_query = normalize_match_text(location)
+    candidates: list[tuple[int, dict[str, Any]]] = []
+
+    for _, row in schedule.iterrows():
+        event_fields = [
+            normalize_match_text(row.get("EventName")),
+            normalize_match_text(row.get("OfficialEventName")),
+            normalize_match_text(row.get("EventFormat")),
+        ]
+        country_field = normalize_match_text(row.get("Country"))
+        location_field = normalize_match_text(row.get("Location"))
+        score = max(match_score(event_query, field) for field in event_fields)
+        score += match_score(country_query, country_field)
+        score += match_score(location_query, location_field)
+        if score <= 0:
+            continue
+        candidates.append(
+            (
+                score,
+                {
+                    "round": clean_int(row.get("RoundNumber")),
+                    "event_name": str(row.get("EventName") or ""),
+                    "official_event_name": str(row.get("OfficialEventName") or ""),
+                    "country": str(row.get("Country") or ""),
+                    "location": str(row.get("Location") or ""),
+                    "score": score,
+                },
+            )
+        )
+
+    candidates = [
+        (score, candidate)
+        for score, candidate in candidates
+        if candidate["round"] is not None
+    ]
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    if not candidates or candidates[0][0] < 8:
+        raise ValueError(
+            "could not resolve FastF1 event from OpenF1 meeting metadata "
+            f"(event={event_name!r}, country={country!r}, location={location!r})"
+        )
+    if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+        names = ", ".join(candidate["event_name"] for _, candidate in candidates[:2])
+        raise ValueError(f"ambiguous FastF1 event match: {names}")
+
+    score, candidate = candidates[0]
+    confidence = min(1.0, score / 24.0)
+    warnings = []
+    if confidence < 0.75:
+        warnings.append(
+            "FastF1 schedule resolver used an approximate event match "
+            f"for {event_name or location or country}."
+        )
+    return int(candidate["round"]), {
+        "round": int(candidate["round"]),
+        "event_name": candidate["event_name"],
+        "official_event_name": candidate["official_event_name"],
+        "country": candidate["country"],
+        "location": candidate["location"],
+        "match_method": "fastf1_schedule_match",
+        "match_confidence": round(confidence, 3),
+        "warnings": warnings,
+    }
+
+
 def load_session(year: int, round_number: int, session_code: str, cache_dir: str):
     os.makedirs(cache_dir, exist_ok=True)
     fastf1.Cache.enable_cache(cache_dir)
     session = fastf1.get_session(year, round_number, session_code)
-    session.load(telemetry=True, weather=True, messages=True)
+    try:
+        session.load(telemetry=True, weather=True, messages=True)
+    except TypeError:
+        try:
+            session.load(telemetry=True, weather=True)
+        except TypeError:
+            try:
+                session.load(telemetry=True)
+            except TypeError:
+                session.load()
     return session
 
 
@@ -299,10 +421,26 @@ def export_geometry(session) -> dict[str, Any]:
     return {"centerline": points, "rotation_deg": rotation}
 
 
-def export_bundle(year: int, round_number: int, session_code: str, session_key: int, cache_dir: str) -> dict[str, Any]:
-    session = load_session(year, round_number, session_code, cache_dir)
+def export_bundle(
+    year: int,
+    round_number: int | None,
+    session_code: str,
+    session_key: int,
+    cache_dir: str,
+    event_name: str | None,
+    country: str | None,
+    location: str | None,
+    session_start: str | None,
+    resolver_method: str,
+) -> dict[str, Any]:
+    resolved_round, resolver = resolve_round(year, round_number, event_name, country, location)
+    if resolver_method == "curated_override":
+        resolver["match_method"] = "curated_override"
+        resolver["match_confidence"] = 1.0
+    session = load_session(year, resolved_round, session_code, cache_dir)
     laps, stints, pits = export_laps_and_stints(session)
     telemetry = export_telemetry(session)
+    warnings = resolver.get("warnings", [])
     sections = {
         "drivers": export_drivers(session),
         "laps": laps,
@@ -321,9 +459,17 @@ def export_bundle(year: int, round_number: int, session_code: str, session_key: 
         "metadata": {
             "source": "fastf1_historical",
             "year": year,
-            "round": round_number,
+            "round": resolved_round,
             "session": session_code,
             "session_key": session_key,
+            "event_query": {
+                "event_name": event_name,
+                "country": country,
+                "location": location,
+                "session_start": session_start,
+            },
+            "resolver": resolver,
+            "warnings": warnings,
         },
         "sections": sections,
     }
@@ -332,14 +478,30 @@ def export_bundle(year: int, round_number: int, session_code: str, session_key: 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--year", type=int, required=True)
-    parser.add_argument("--round", type=int, required=True)
+    parser.add_argument("--round", type=int)
     parser.add_argument("--session", required=True)
     parser.add_argument("--session-key", type=int, required=True)
+    parser.add_argument("--event-name")
+    parser.add_argument("--country")
+    parser.add_argument("--location")
+    parser.add_argument("--session-start")
+    parser.add_argument("--resolver-method", default="provided_round")
     parser.add_argument("--cache-dir", default="cache/fastf1")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    bundle = export_bundle(args.year, args.round, args.session, args.session_key, args.cache_dir)
+    bundle = export_bundle(
+        args.year,
+        args.round,
+        args.session,
+        args.session_key,
+        args.cache_dir,
+        args.event_name,
+        args.country,
+        args.location,
+        args.session_start,
+        args.resolver_method,
+    )
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(bundle, handle, separators=(",", ":"))

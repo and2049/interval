@@ -2,7 +2,7 @@
 
 Replay-first F1 second-screen dashboard for historical race sessions.
 
-The MVP target is the 2024 Bahrain Grand Prix race (`session_key=9472`) using FastF1 historical replay data cached in SQLite, backend-owned replay snapshots, and a dense engineer-inspired SolidJS dashboard.
+The MVP target is historical race replay using FastF1 data cached in SQLite, backend-owned replay snapshots, and a dense engineer-inspired SolidJS dashboard. The 2024 Bahrain Grand Prix race (`session_key=9472`) remains the seeded example and resolver override.
 
 ## Current Shape
 
@@ -16,16 +16,16 @@ The reference `docs/f1-race-replay` project is used for modeling ideas only. Thi
 
 ## MVP Replay Path
 
-The frontend defaults toward `session_key=9472`. If the historical replay is not cached yet, the dashboard stays on Bahrain and prompts the user to choose `INGEST + OPEN`. The seeded demo replay (`session_key=9839`) remains available from the session selector for offline UI development.
+The frontend opens the last selected cached session when available. If that replay is missing or stale, the app clears the active replay and leaves the selector in control instead of falling back to Bahrain. If a selected historical replay is not cached yet, the dashboard prompts the user to choose `INGEST + OPEN`. The seeded Bahrain race (`session_key=9472`) remains available as a known-good FastF1 override, and the seeded demo replay (`session_key=9839`) remains available for offline UI development.
 
-For historical replays, FastF1 telemetry is the preferred source for driver locations and track geometry. For older cached OpenF1 data, the backend still:
+For historical replays, FastF1 telemetry is the preferred source for driver locations and track geometry. Race ingest resolves OpenF1 meeting/session metadata to a FastF1 year, round, and race session code, with curated overrides for known special cases. For older cached OpenF1 data, the backend still:
 
 - prefers usable upstream location geometry when present;
 - falls back to curated Bahrain geometry for `session_key=9472`;
 - projects driver dots onto that centerline for the map;
 - keeps timing order based on normalized position/interval data, not map projection.
 
-Replay payloads use `contract_version: "replay.v1"`. REST snapshots and SSE snapshots share the same nested shape. The frontend advances a local smooth cursor for playback controls, but snapshot requests are quantized to the backend `frame_step_seconds` so the dashboard does not refetch the same persisted frame on every animation tick.
+Replay payloads use `contract_version: "replay.v1"`. REST snapshots and SSE snapshots share the same nested shape. FastF1 historical replays currently persist frames at 5 Hz (`frame_step_seconds = 0.2`); legacy OpenF1/demo replays may use a lower cadence. The frontend advances a local smooth cursor for playback controls, but snapshot requests are quantized to the backend `frame_step_seconds` so the dashboard does not refetch the same persisted frame on every animation tick.
 
 Backend-derived snapshot sections currently include 3-lap pace metrics, map quality labels, race-control history, weather context, timing rows, and projected track positions. Panels should read those sections directly instead of inferring state from raw OpenF1 records.
 
@@ -77,6 +77,8 @@ Smoke script parameters:
 - `-BackendBind`: backend bind address used by the smoke backend.
 - `-FrontendPort`: Vite port used by the smoke frontend.
 - `-TimeoutSeconds`: health-check and stream-read timeout.
+- `-SessionKey`, `-MeetingKey`, `-ExpectedMeetingName`, and `-SnapshotT`: cached replay target. Defaults cover Bahrain `9472`.
+- `-ExpectedMapMode`, `-ExpectedTrackQuality`, `-ExpectedGeometrySource`, and `-MinimumTimingRows`: target-specific replay quality assertions. Defaults match the Bahrain curated/projected fallback.
 
 ## Verification
 
@@ -93,13 +95,19 @@ powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
 The static check parses the PowerShell scripts. The main verification script runs that static check, backend tests, frontend tests, and the frontend production build.
 The script checks for required local tools (`cargo` and `bun`) before running the gates.
 
-After Bahrain has been ingested once into `interval.db`, run the full cached MVP verification:
+After a historical race has been ingested once into `interval.db`, run the full cached MVP verification. With no extra parameters this checks the seeded Bahrain target:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/verify.ps1 -WithSmoke
 ```
 
-The smoke step builds a fresh backend binary, rebuilds Bahrain replay artifacts from the cached raw OpenF1 bundle, starts the backend and Vite dev server, first confirms Bahrain is cached, then checks replay metadata, meeting context, a mid-race snapshot with section quality labels and 3-lap derived metrics, invalid replay-cursor handling, curated track geometry, REST/proxied replay events, initial SSE stream events, and the Vite API proxy before shutting the local smoke processes down.
+The smoke step builds a fresh backend binary, rebuilds the requested replay artifacts from the cached raw historical bundle, starts the backend and Vite dev server, confirms the selected replay is cached, then checks replay metadata, meeting context, a mid-race snapshot with section quality labels and 3-lap derived metrics, invalid replay-cursor handling, track geometry, REST/proxied replay events, initial SSE stream events, metadata-driven stream cadence, and the Vite API proxy before shutting the local smoke processes down.
+
+To validate a second cached historical race, pass its OpenF1 `SessionKey`, `MeetingKey`, expected race name, and quality expectations, for example:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/smoke-mvp.ps1 -SessionKey 9999 -MeetingKey 2222 -ExpectedMeetingName "Japanese Grand Prix" -ExpectedGeometrySource fast_f1_telemetry -ExpectedMapMode gps -ExpectedTrackQuality interpolated
+```
 
 Smoke process logs are written under `tmp/`. If the backend or Vite exits before becoming healthy, the smoke script reports the tail of the relevant error log instead of only timing out.
 

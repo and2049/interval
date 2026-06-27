@@ -8,6 +8,7 @@ import {
   nextSessionSelection,
   readinessForSession,
   activeSessionSelectionMatches,
+  selectedSessionLabel,
   shouldSyncActiveSessionSelection,
   seasonOptions,
   sessionOptions
@@ -56,6 +57,13 @@ describe("readinessForSession", () => {
   test("finds the selected readiness entry", () => {
     expect(readinessForSession([readiness(9472), readiness(9839)], 9839)?.session.session_key).toBe(9839);
     expect(readinessForSession([readiness(9472)], undefined)).toBeUndefined();
+  });
+});
+
+describe("selectedSessionLabel", () => {
+  test("formats selected session context for empty replay messages", () => {
+    expect(selectedSessionLabel(readiness(9472))).toBe("2024 Race #9472");
+    expect(selectedSessionLabel(undefined)).toBeUndefined();
   });
 });
 

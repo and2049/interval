@@ -1,4 +1,7 @@
-use crate::{connectors::openf1_historical::RawEndpoint, domain::Session};
+use crate::{
+    connectors::openf1_historical::RawEndpoint,
+    domain::{Meeting, Session},
+};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -57,8 +60,9 @@ impl FastF1HistoricalClient {
     pub async fn fetch_race_bundle(
         &self,
         session: &Session,
+        meeting: Option<&Meeting>,
     ) -> Result<Vec<RawEndpoint>, FastF1HistoricalError> {
-        let config = FastF1SessionConfig::for_session(session)?;
+        let config = FastF1SessionConfig::for_session(session, meeting)?;
         let root = self.root.clone();
         let python_override = self.python_override.clone();
         let bootstrap_python = self.bootstrap_python.clone();
@@ -79,13 +83,12 @@ impl FastF1HistoricalClient {
             }
 
             let mut command = Command::new(&python);
+            let warnings = config.warnings.clone();
             command
                 .current_dir(&root)
                 .arg(SCRIPT_PATH)
                 .arg("--year")
                 .arg(config.year.to_string())
-                .arg("--round")
-                .arg(config.round.to_string())
                 .arg("--session")
                 .arg(config.session_code)
                 .arg("--session-key")
@@ -93,7 +96,29 @@ impl FastF1HistoricalClient {
                 .arg("--cache-dir")
                 .arg(DEFAULT_CACHE_DIR)
                 .arg("--output")
-                .arg(&output_path);
+                .arg(&output_path)
+                .arg("--resolver-method")
+                .arg(config.resolver_method);
+
+            match config.round {
+                Some(round) => {
+                    command.arg("--round").arg(round.to_string());
+                }
+                None => {
+                    if let Some(event_name) = config.event_name {
+                        command.arg("--event-name").arg(event_name);
+                    }
+                    if let Some(country) = config.country {
+                        command.arg("--country").arg(country);
+                    }
+                    if let Some(location) = config.location {
+                        command.arg("--location").arg(location);
+                    }
+                    if let Some(session_start) = config.session_start {
+                        command.arg("--session-start").arg(session_start);
+                    }
+                }
+            }
 
             let output = run_command(command, timeout)?;
             if !output.status.success() {
@@ -104,7 +129,7 @@ impl FastF1HistoricalClient {
             }
 
             let payload = fs::read_to_string(output_path)?;
-            bundle_from_export(session_key, &payload)
+            bundle_from_export(session_key, &payload, &warnings)
         })
         .await
         .map_err(|error| FastF1HistoricalError::Join(error.to_string()))?
@@ -190,13 +215,18 @@ fn run_command(
 fn bundle_from_export(
     session_key: i64,
     payload: &str,
+    additional_warnings: &[String],
 ) -> Result<Vec<RawEndpoint>, FastF1HistoricalError> {
     let export = serde_json::from_str::<FastF1Export>(payload)?;
     let mut bundle = Vec::with_capacity(export.sections.len() + 1);
+    let metadata = merge_metadata_warnings(
+        export.metadata.unwrap_or(Value::Object(Default::default())),
+        additional_warnings,
+    );
     bundle.push(RawEndpoint {
         endpoint: "fastf1_metadata".to_string(),
         session_key,
-        payload: export.metadata.unwrap_or(Value::Object(Default::default())),
+        payload: metadata,
     });
     for (name, payload) in export.sections {
         bundle.push(RawEndpoint {
@@ -208,27 +238,76 @@ fn bundle_from_export(
     Ok(bundle)
 }
 
+fn merge_metadata_warnings(mut metadata: Value, additional_warnings: &[String]) -> Value {
+    if additional_warnings.is_empty() {
+        return metadata;
+    }
+    if !metadata.is_object() {
+        metadata = Value::Object(Default::default());
+    }
+    let object = metadata.as_object_mut().expect("metadata object");
+    let warnings = object
+        .entry("warnings")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !warnings.is_array() {
+        *warnings = Value::Array(Vec::new());
+    }
+    let array = warnings.as_array_mut().expect("warnings array");
+    for warning in additional_warnings {
+        array.push(Value::String(warning.clone()));
+    }
+    metadata
+}
+
 #[derive(Debug)]
 struct FastF1SessionConfig {
     year: i32,
-    round: i32,
+    round: Option<i32>,
     session_code: &'static str,
+    resolver_method: &'static str,
+    event_name: Option<String>,
+    country: Option<String>,
+    location: Option<String>,
+    session_start: Option<String>,
+    warnings: Vec<String>,
 }
 
 impl FastF1SessionConfig {
-    fn for_session(session: &Session) -> Result<Self, FastF1HistoricalError> {
+    fn for_session(
+        session: &Session,
+        meeting: Option<&Meeting>,
+    ) -> Result<Self, FastF1HistoricalError> {
         match session.session_key {
             9472 => Ok(Self {
                 year: 2024,
-                round: 1,
+                round: Some(1),
                 session_code: "R",
+                resolver_method: "curated_override",
+                event_name: None,
+                country: None,
+                location: None,
+                session_start: None,
+                warnings: vec![
+                    "FastF1 resolver used curated override for session_key 9472.".to_string(),
+                ],
             }),
-            _ if session.name.eq_ignore_ascii_case("race") => {
-                Err(FastF1HistoricalError::UnsupportedSession(format!(
-                    "FastF1 session mapping is not configured for session_key {}",
+            _ if session.name.eq_ignore_ascii_case("race") => match meeting {
+                Some(meeting) => Ok(Self {
+                    year: session.year,
+                    round: None,
+                    session_code: "R",
+                    resolver_method: "fastf1_schedule_match",
+                    event_name: Some(meeting.name.clone()),
+                    country: Some(meeting.country.clone()),
+                    location: Some(meeting.location.clone()),
+                    session_start: Some(session.start_time.clone()),
+                    warnings: vec![],
+                }),
+                None => Err(FastF1HistoricalError::UnsupportedSession(format!(
+                    "meeting metadata is required to resolve session_key {} with FastF1",
                     session.session_key
-                )))
-            }
+                ))),
+            },
             _ => Err(FastF1HistoricalError::UnsupportedSession(
                 "only race sessions are supported".to_string(),
             )),
@@ -277,11 +356,91 @@ mod tests {
             total_laps: 57,
         };
 
-        let config = FastF1SessionConfig::for_session(&session).unwrap();
+        let config = FastF1SessionConfig::for_session(&session, None).unwrap();
 
         assert_eq!(config.year, 2024);
-        assert_eq!(config.round, 1);
+        assert_eq!(config.round, Some(1));
         assert_eq!(config.session_code, "R");
+        assert_eq!(config.resolver_method, "curated_override");
+    }
+
+    #[test]
+    fn race_session_uses_meeting_metadata_for_schedule_match() {
+        let session = Session {
+            session_key: 9999,
+            meeting_key: 2222,
+            year: 2025,
+            name: "Race".to_string(),
+            session_type: crate::domain::SessionType::Race,
+            start_time: "2025-04-06T05:00:00Z".to_string(),
+            end_time: String::new(),
+            total_laps: 53,
+        };
+        let meeting = Meeting {
+            meeting_key: 2222,
+            year: 2025,
+            name: "Japanese Grand Prix".to_string(),
+            country: "Japan".to_string(),
+            location: "Suzuka".to_string(),
+        };
+
+        let config = FastF1SessionConfig::for_session(&session, Some(&meeting)).unwrap();
+
+        assert_eq!(config.year, 2025);
+        assert_eq!(config.round, None);
+        assert_eq!(config.session_code, "R");
+        assert_eq!(config.resolver_method, "fastf1_schedule_match");
+        assert_eq!(config.event_name.as_deref(), Some("Japanese Grand Prix"));
+        assert_eq!(config.country.as_deref(), Some("Japan"));
+        assert_eq!(config.location.as_deref(), Some("Suzuka"));
+    }
+
+    #[test]
+    fn another_race_session_uses_schedule_match_without_bahrain_override() {
+        let session = Session {
+            session_key: 10_100,
+            meeting_key: 2_300,
+            year: 2024,
+            name: "Race".to_string(),
+            session_type: crate::domain::SessionType::Race,
+            start_time: "2024-09-01T13:00:00Z".to_string(),
+            end_time: String::new(),
+            total_laps: 53,
+        };
+        let meeting = Meeting {
+            meeting_key: 2_300,
+            year: 2024,
+            name: "Italian Grand Prix".to_string(),
+            country: "Italy".to_string(),
+            location: "Monza".to_string(),
+        };
+
+        let config = FastF1SessionConfig::for_session(&session, Some(&meeting)).unwrap();
+
+        assert_eq!(config.year, 2024);
+        assert_eq!(config.round, None);
+        assert_eq!(config.resolver_method, "fastf1_schedule_match");
+        assert_eq!(config.event_name.as_deref(), Some("Italian Grand Prix"));
+        assert_eq!(config.country.as_deref(), Some("Italy"));
+        assert_eq!(config.location.as_deref(), Some("Monza"));
+    }
+
+    #[test]
+    fn schedule_match_requires_meeting_metadata() {
+        let session = Session {
+            session_key: 9999,
+            meeting_key: 2222,
+            year: 2025,
+            name: "Race".to_string(),
+            session_type: crate::domain::SessionType::Race,
+            start_time: String::new(),
+            end_time: String::new(),
+            total_laps: 53,
+        };
+
+        let error = FastF1SessionConfig::for_session(&session, None).unwrap_err();
+
+        assert!(error.to_string().contains("meeting metadata is required"));
     }
 
     #[test]
@@ -295,7 +454,7 @@ mod tests {
         })
         .to_string();
 
-        let bundle = bundle_from_export(9472, &payload).unwrap();
+        let bundle = bundle_from_export(9472, &payload, &[]).unwrap();
 
         assert!(bundle
             .iter()
@@ -306,5 +465,25 @@ mod tests {
         assert!(bundle
             .iter()
             .any(|entry| entry.endpoint == "fastf1_telemetry"));
+    }
+
+    #[test]
+    fn resolver_warnings_are_merged_into_metadata() {
+        let payload = json!({
+            "metadata": { "source": "fastf1_historical", "warnings": ["python warning"] },
+            "sections": {}
+        })
+        .to_string();
+
+        let bundle = bundle_from_export(9472, &payload, &["rust warning".to_string()]).unwrap();
+        let metadata = bundle
+            .iter()
+            .find(|entry| entry.endpoint == "fastf1_metadata")
+            .unwrap();
+
+        assert_eq!(
+            metadata.payload["warnings"],
+            json!(["python warning", "rust warning"])
+        );
     }
 }

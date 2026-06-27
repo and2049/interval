@@ -67,19 +67,23 @@ export function quantizeReplayFrameTime(t: number, metadata: ReplayMetadata): nu
   return clampReplayTime(minT + frameIndex * step, metadata.max_t);
 }
 
-export function shouldReloadSession(currentSessionKey: number, nextSessionKey: number): boolean {
+export function shouldReloadSession(
+  currentSessionKey: number | undefined,
+  nextSessionKey: number
+): boolean {
   return currentSessionKey === nextSessionKey;
 }
 
 export function replayResourceSessionKey(
-  currentSessionKey: number,
+  currentSessionKey: number | undefined,
   metadata?: ReplayMetadata
 ): number | undefined {
+  if (currentSessionKey == null) return undefined;
   return metadata?.session.session_key === currentSessionKey ? currentSessionKey : undefined;
 }
 
 export function snapshotRequest(
-  currentSessionKey: number,
+  currentSessionKey: number | undefined,
   metadata: ReplayMetadata | undefined,
   t: number
 ): { key: number; t: number } | undefined {
@@ -90,39 +94,44 @@ export function snapshotRequest(
 }
 
 export function activeReplayMetadata(
-  currentSessionKey: number,
+  currentSessionKey: number | undefined,
   metadata?: ReplayMetadata
 ): ReplayMetadata | undefined {
+  if (currentSessionKey == null) return undefined;
   return metadata?.session.session_key === currentSessionKey ? metadata : undefined;
 }
 
 export function activeReplaySnapshot(
-  currentSessionKey: number,
+  currentSessionKey: number | undefined,
   snapshot?: ReplaySnapshot
 ): ReplaySnapshot | undefined {
+  if (currentSessionKey == null) return undefined;
   return snapshot?.cursor.session_key === currentSessionKey ? snapshot : undefined;
 }
 
 export function activeTrackGeometry(
-  currentSessionKey: number,
+  currentSessionKey: number | undefined,
   geometry?: TrackGeometry
 ): TrackGeometry | undefined {
+  if (currentSessionKey == null) return undefined;
   return geometry?.session_key === currentSessionKey ? geometry : undefined;
 }
 
 export function activeResourceError(
-  currentSessionKey: number,
+  currentSessionKey: number | undefined,
   resourceSessionKey: number | undefined,
   error?: unknown
 ): unknown {
+  if (currentSessionKey == null) return undefined;
   return resourceSessionKey === currentSessionKey ? error : undefined;
 }
 
 export function activeResourceLoading(
-  currentSessionKey: number,
+  currentSessionKey: number | undefined,
   resourceSessionKey: number | undefined,
   loading: boolean
 ): boolean {
+  if (currentSessionKey == null) return false;
   return resourceSessionKey === currentSessionKey && loading;
 }
 
@@ -133,20 +142,25 @@ export function replayLoadMessage(options: {
   snapshotLoading?: boolean;
   snapshotError?: unknown;
   sessionKey?: number;
-  preferredHistoricalSessionKey?: number;
+  selectedSessionLabel?: string;
 }): string {
   if (options.metadataLoading && !options.metadata) return "Connecting to replay cache...";
   if (options.snapshotLoading && options.metadata) return "Loading replay frame...";
   if (options.metadataError) {
     if (isMissingReplay(options.metadataError)) {
-      return options.sessionKey === options.preferredHistoricalSessionKey
-        ? "Bahrain replay is not cached yet. Choose INGEST + OPEN to fetch FastF1 data."
+      return options.selectedSessionLabel
+        ? `No cached replay for selected race: ${options.selectedSessionLabel}. Choose INGEST + OPEN.`
         : "Replay is not cached yet. Choose INGEST + OPEN for this session.";
     }
     return errorText(options.metadataError, "Replay metadata unavailable.");
   }
   if (options.snapshotError) return errorText(options.snapshotError, "Replay snapshot unavailable.");
   if (options.metadata) return "Loading replay frame...";
+  if (options.sessionKey == null) {
+    return options.selectedSessionLabel
+      ? `No cached replay for selected race: ${options.selectedSessionLabel}. Choose INGEST + OPEN.`
+      : "Select a historical race, then choose INGEST + OPEN.";
+  }
   return "Connecting to replay cache...";
 }
 

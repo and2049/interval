@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { LAST_SESSION_STORAGE_KEY, readStoredSessionKey, writeStoredSessionKey } from "./sessionKeys";
+import {
+  clearStoredSessionKey,
+  LAST_SESSION_STORAGE_KEY,
+  readStoredSessionKey,
+  writeStoredSessionKey
+} from "./sessionKeys";
 
 const originalLocalStorage = globalThis.localStorage;
 
@@ -35,6 +40,14 @@ describe("session key storage", () => {
 
     expect(storage[LAST_SESSION_STORAGE_KEY]).toBe("9839");
   });
+
+  test("clears stale stored session ids", () => {
+    const storage = installStorage({ [LAST_SESSION_STORAGE_KEY]: "9472" });
+
+    clearStoredSessionKey();
+
+    expect(storage[LAST_SESSION_STORAGE_KEY]).toBeUndefined();
+  });
 });
 
 function installStorage(initial: Record<string, string>) {
@@ -45,6 +58,9 @@ function installStorage(initial: Record<string, string>) {
       getItem: (key: string) => storage[key] ?? null,
       setItem: (key: string, value: string) => {
         storage[key] = value;
+      },
+      removeItem: (key: string) => {
+        delete storage[key];
       }
     }
   });

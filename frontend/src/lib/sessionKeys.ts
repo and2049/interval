@@ -22,3 +22,11 @@ export function writeStoredSessionKey(sessionKey: number) {
     // Local storage can be unavailable in restricted browser modes.
   }
 }
+
+export function clearStoredSessionKey() {
+  try {
+    globalThis.localStorage?.removeItem(LAST_SESSION_STORAGE_KEY);
+  } catch {
+    // Local storage can be unavailable in restricted browser modes.
+  }
+}

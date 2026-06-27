@@ -39,7 +39,7 @@ Returns race sessions for the selected meeting with replay readiness. MVP scope 
 
 ### `POST /api/sessions/{session_key}/ingest`
 
-Fetches the historical FastF1 bundle for a race session, stores raw sections in SQLite, normalizes records, generates replay snapshots, and persists replay metadata/events.
+Fetches the historical FastF1 bundle for a race session, stores raw sections in SQLite, normalizes records, generates replay snapshots, and persists replay metadata/events. The backend resolves OpenF1 meeting/session metadata to a FastF1 race round, using curated overrides only for known special cases such as Bahrain `9472`.
 
 Response:
 
@@ -72,9 +72,11 @@ Response:
 }
 ```
 
+`warnings` can include degraded channel coverage and resolver notes, for example approximate FastF1 schedule matches, curated override usage, or a summary such as `FastF1 resolved Japanese Grand Prix to round 4 via fastf1_schedule_match. confidence 0.917`.
+
 Failure responses keep the same envelope so the frontend can show the error while session readiness records the failed ingest state. FastF1 fetch/runtime failures return `502`, fetch timeouts return `504`, and replay rebuild failures return `500` with `"status": "failed"` and an `"error"` message.
 
-The curated MVP fixture is the 2024 Bahrain Grand Prix race (`session_key=9472`). The seeded Abu Dhabi fixture (`session_key=9839`) remains an offline demo and is marked `is_demo: true` in session readiness.
+The curated fixture is the 2024 Bahrain Grand Prix race (`session_key=9472`). It remains a seeded known-good example and FastF1 resolver override, not the only supported historical race. The frontend should not fall back to Bahrain when another selected replay is missing; it should keep the selected race visible and prompt for ingest. The seeded Abu Dhabi fixture (`session_key=9839`) remains an offline demo and is marked `is_demo: true` in session readiness.
 
 ### `GET /api/sessions/{session_key}/replay/metadata`
 
@@ -98,7 +100,7 @@ Returns session metadata, optional meeting identity, replay duration, frame boun
     "location": "Sakhir"
   },
   "duration_seconds": 5996.749,
-  "frame_step_seconds": 0.5,
+  "frame_step_seconds": 0.2,
   "available_channels": {
     "timing": true,
     "location": true,
@@ -122,6 +124,8 @@ Returns session metadata, optional meeting identity, replay duration, frame boun
 Returns the deterministic replay snapshot at or immediately before `t`. Requests before the first frame clamp to the first frame; requests after the last frame clamp to the final frame. The snapshot is the synchronized contract for all panels.
 
 Clients may animate their own playback cursor, but should request snapshots on persisted frame boundaries using `ReplayMetadata.frame_step_seconds`. Repeated requests inside the same frame window are expected to resolve to the same backend snapshot.
+
+FastF1 historical replays currently use 5 Hz persisted snapshots (`0.2s`). Legacy OpenF1/demo replays can report a different cadence through the same field.
 
 ```json
 {
@@ -158,7 +162,7 @@ Clients may animate their own playback cursor, but should request snapshots on p
 
 `track.quality` describes the position data used by the map for that snapshot. For the Bahrain MVP fallback, geometry can be ready while map positions are still `projected`.
 
-`race_control.messages` in a snapshot is a recent panel window for the current replay time, capped to keep half-second snapshots lightweight. Use `GET /api/sessions/{session_key}/replay/events` for the complete canonical race-control and derived event timeline.
+`race_control.messages` in a snapshot is a recent panel window for the current replay time, capped to keep high-cadence snapshots lightweight. Use `GET /api/sessions/{session_key}/replay/events` for the complete canonical race-control and derived event timeline.
 
 `derived_metrics` is backend-owned snapshot data, not a frontend calculation surface. MVP metrics include recent 3-lap pace values for drivers with enough completed valid laps:
 
@@ -175,7 +179,7 @@ Clients may animate their own playback cursor, but should request snapshots on p
 
 Returns a versioned event list ordered by replay time. Event kinds include `race_control`, `track_status`, `pit_stop`, `stint_change`, `leader_change`, `weather_change`, and `data_gap`.
 
-`race_control`, `track_status`, and `pit_stop` originate from OpenF1 records. `stint_change`, `leader_change`, and `weather_change` are backend-derived from normalized stints, position records, and weather samples. Derived events use `"source": "derived"` and remain synchronized to replay time `t`.
+`race_control`, `track_status`, and `pit_stop` originate from normalized historical records, usually FastF1 for newly ingested historical races and OpenF1 for legacy cached replays. `stint_change`, `leader_change`, and `weather_change` are backend-derived from normalized stints, position records, and weather samples. Derived events use `"source": "derived"` and remain synchronized to replay time `t`.
 
 Returns `404` when replay artifacts do not exist for the session. A valid replay with no timeline events returns `200` with an empty `events` array.
 
@@ -217,4 +221,4 @@ Returns static track geometry for the selected session.
 }
 ```
 
-For the MVP Bahrain fixture, OpenF1 `location` remains preferred when it is available. If it is missing, the backend uses curated static Bahrain geometry and projects driver dots onto the centerline for visual placement. Timing order remains based on OpenF1 `position`/`intervals`, not map projection.
+For FastF1 historical replays, FastF1 telemetry geometry is preferred. Legacy OpenF1 replays still prefer OpenF1 `location` when available, then curated static geometry for known fixtures such as Bahrain, then schematic fallback. Timing order remains based on normalized position/interval records, not map projection.

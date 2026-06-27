@@ -36,7 +36,7 @@ export function sessionStatusBadgeText(entry: SessionReadiness) {
 export function sessionActionLabel(args: {
   ingestState: SessionActionState;
   selectedSession?: number;
-  activeSessionKey: number;
+  activeSessionKey?: number;
   readiness?: SessionReadiness;
 }) {
   if (args.ingestState === "ingesting") return "INGESTING";

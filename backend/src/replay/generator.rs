@@ -3,7 +3,8 @@ use crate::{
     normalization::RaceData,
 };
 
-const SNAPSHOT_STEP_SECONDS: f64 = 0.5;
+const FASTF1_SNAPSHOT_STEP_SECONDS: f64 = 0.2;
+const DEFAULT_SNAPSHOT_STEP_SECONDS: f64 = 0.5;
 const DEFAULT_DURATION_SECONDS: f64 = 7_200.0;
 
 pub struct GeneratedReplay {
@@ -15,6 +16,7 @@ pub struct GeneratedReplay {
 }
 
 pub fn generate_replay(mut session: Session, data: RaceData) -> anyhow::Result<GeneratedReplay> {
+    let snapshot_step_seconds = snapshot_step_seconds(&data);
     let max_lap = data
         .laps
         .iter()
@@ -46,8 +48,8 @@ pub fn generate_replay(mut session: Session, data: RaceData) -> anyhow::Result<G
     let index = super::indexed_data::ReplayDataIndex::new(&data);
     let mut snapshots = Vec::new();
     let mut frame_index = 0_i64;
-    while frame_index as f64 * SNAPSHOT_STEP_SECONDS <= max_t + f64::EPSILON {
-        let t = frame_time(frame_index);
+    while frame_index as f64 * snapshot_step_seconds <= max_t + f64::EPSILON {
+        let t = frame_time(frame_index, snapshot_step_seconds);
         snapshots.push(super::snapshot_builder::build_indexed_snapshot(
             &session,
             &index,
@@ -73,7 +75,7 @@ pub fn generate_replay(mut session: Session, data: RaceData) -> anyhow::Result<G
         &data,
         &track_geometry,
         max_t,
-        SNAPSHOT_STEP_SECONDS,
+        snapshot_step_seconds,
         snapshots.len() as i64,
     );
     let events = super::events::generate_events(&data);
@@ -87,8 +89,16 @@ pub fn generate_replay(mut session: Session, data: RaceData) -> anyhow::Result<G
     })
 }
 
-fn frame_time(frame_index: i64) -> f64 {
-    let t = frame_index as f64 * SNAPSHOT_STEP_SECONDS;
+fn snapshot_step_seconds(data: &RaceData) -> f64 {
+    match data.source {
+        crate::normalization::RaceDataSource::FastF1Historical => FASTF1_SNAPSHOT_STEP_SECONDS,
+        crate::normalization::RaceDataSource::OpenF1Historical
+        | crate::normalization::RaceDataSource::Demo => DEFAULT_SNAPSHOT_STEP_SECONDS,
+    }
+}
+
+fn frame_time(frame_index: i64, snapshot_step_seconds: f64) -> f64 {
+    let t = frame_index as f64 * snapshot_step_seconds;
     (t * 1_000.0).round() / 1_000.0
 }
 
@@ -195,10 +205,73 @@ mod tests {
 
         let generated = generate_replay(session, data).unwrap();
         assert_eq!(generated.metadata.session.total_laps, 1);
-        assert_eq!(generated.metadata.frame_step_seconds, SNAPSHOT_STEP_SECONDS);
-        assert_eq!(generated.snapshots[1].cursor.t, SNAPSHOT_STEP_SECONDS);
+        assert_eq!(
+            generated.metadata.frame_step_seconds,
+            DEFAULT_SNAPSHOT_STEP_SECONDS
+        );
+        assert_eq!(
+            generated.snapshots[1].cursor.t,
+            DEFAULT_SNAPSHOT_STEP_SECONDS
+        );
         assert!(generated.snapshots.len() > 1);
         assert_eq!(generated.snapshots[1].timing.rows[0].driver.code, "NOR");
+    }
+
+    #[test]
+    fn fastf1_replays_generate_five_hz_frames() {
+        let session = Session {
+            session_key: 1,
+            meeting_key: 1,
+            year: 2024,
+            name: "Race".to_string(),
+            session_type: crate::domain::SessionType::Race,
+            start_time: String::new(),
+            end_time: String::new(),
+            total_laps: 1,
+        };
+        let driver = Driver {
+            driver_number: 4,
+            code: "NOR".to_string(),
+            full_name: "Lando Norris".to_string(),
+            team_name: "McLaren".to_string(),
+            team_colour: "FF8000".to_string(),
+        };
+        let data = RaceData {
+            source: crate::normalization::RaceDataSource::FastF1Historical,
+            drivers: vec![driver],
+            laps: vec![LapRecord {
+                t_start: 0.0,
+                lap: crate::domain::Lap {
+                    driver_number: 4,
+                    lap_number: 1,
+                    lap_duration: Some(1.0),
+                    sector_1: None,
+                    sector_2: None,
+                    sector_3: None,
+                    is_pit_out_lap: false,
+                },
+            }],
+            intervals: vec![],
+            positions: vec![],
+            locations: vec![],
+            geometry_locations: vec![],
+            pits: vec![],
+            race_control: vec![],
+            stints: vec![],
+            weather: vec![],
+            session_results: vec![],
+        };
+
+        let generated = generate_replay(session, data).unwrap();
+
+        assert_eq!(
+            generated.metadata.frame_step_seconds,
+            FASTF1_SNAPSHOT_STEP_SECONDS
+        );
+        assert_eq!(
+            generated.snapshots[1].cursor.t,
+            FASTF1_SNAPSHOT_STEP_SECONDS
+        );
     }
 
     #[test]

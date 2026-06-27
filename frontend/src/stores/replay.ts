@@ -1,10 +1,6 @@
 import { createEffect, createResource, createSignal, onCleanup } from "solid-js";
 import { api } from "../lib/api";
-import {
-  MVP_HISTORICAL_SESSION_KEY,
-  readStoredSessionKey,
-  writeStoredSessionKey
-} from "../lib/sessionKeys";
+import { clearStoredSessionKey, readStoredSessionKey, writeStoredSessionKey } from "../lib/sessionKeys";
 import {
   activeReplayMetadata,
   activeReplaySnapshot,
@@ -23,9 +19,7 @@ import type { ReplaySnapshot } from "../../../shared/types/api";
 const PLAYBACK_TICK_MS = 100;
 
 export function createReplayStore() {
-  const [sessionKey, setSessionKey] = createSignal(
-    readStoredSessionKey() ?? MVP_HISTORICAL_SESSION_KEY
-  );
+  const [sessionKey, setSessionKey] = createSignal<number | undefined>(readStoredSessionKey());
   const [playing, setPlaying] = createSignal(false);
   const [speed, setSpeed] = createSignal(1);
   const [time, setTime] = createSignal(0);
@@ -110,6 +104,15 @@ export function createReplayStore() {
     const meta = activeMetadata();
     if (meta && !playing()) {
       void loadSnapshot(time());
+    }
+  });
+
+  createEffect(() => {
+    if (!metadata.error || metadata.loading || sessionKey() == null) return;
+    const message = metadata.error instanceof Error ? metadata.error.message : String(metadata.error);
+    if (message.toLowerCase().includes("resource not found") || message.includes("404")) {
+      clearStoredSessionKey();
+      setSessionKey(undefined);
     }
   });
 

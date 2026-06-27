@@ -18,6 +18,7 @@ pub async fn ingest_session(
     let session = storage::get_session(&state.pool, session_key)
         .await?
         .ok_or(ApiError::NotFound)?;
+    let meeting = storage::get_meeting(&state.pool, session.meeting_key).await?;
     storage::set_ingest_status(
         &state.pool,
         session_key,
@@ -28,7 +29,7 @@ pub async fn ingest_session(
 
     let bundle = match tokio::time::timeout(
         Duration::from_secs(1_000),
-        state.fastf1.fetch_race_bundle(&session),
+        state.fastf1.fetch_race_bundle(&session, meeting.as_ref()),
     )
     .await
     {
@@ -67,6 +68,7 @@ pub async fn ingest_session(
     };
 
     let cached_endpoints = bundle.len();
+    let resolver_warnings = fastf1_metadata_warnings(&bundle);
     storage::store_raw_bundle(&state.pool, &bundle).await?;
     storage::set_ingest_status(
         &state.pool,
@@ -103,6 +105,9 @@ pub async fn ingest_session(
     )
     .await?;
 
+    let mut warnings = built.warnings;
+    warnings.extend(resolver_warnings);
+
     Ok(Json(IngestResponse {
         session_key,
         cached_endpoints,
@@ -111,10 +116,115 @@ pub async fn ingest_session(
         endpoint_coverage: built.endpoint_coverage,
         track_geometry: Some(built.track_geometry),
         available_channels: Some(built.available_channels),
-        warnings: built.warnings,
+        warnings,
         error: None,
     })
     .into_response())
+}
+
+fn fastf1_metadata_warnings(
+    bundle: &[crate::connectors::openf1_historical::RawEndpoint],
+) -> Vec<String> {
+    let Some(metadata) = bundle
+        .iter()
+        .find(|entry| entry.endpoint == "fastf1_metadata")
+        .map(|entry| &entry.payload)
+    else {
+        return Vec::new();
+    };
+
+    let mut messages = metadata
+        .get("warnings")
+        .and_then(|warnings| warnings.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    if let Some(summary) = fastf1_resolver_summary(metadata) {
+        messages.push(summary);
+    }
+
+    messages.sort();
+    messages.dedup();
+    messages
+}
+
+fn fastf1_resolver_summary(metadata: &serde_json::Value) -> Option<String> {
+    let resolver = metadata.get("resolver")?;
+    let method = resolver.get("match_method")?.as_str()?;
+    let round = resolver.get("round")?.as_i64()?;
+    let event = resolver
+        .get("event_name")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("selected event");
+    let confidence = resolver
+        .get("match_confidence")
+        .and_then(|value| value.as_f64())
+        .map(|value| format!(" confidence {:.3}", value))
+        .unwrap_or_default();
+
+    Some(format!(
+        "FastF1 resolved {event} to round {round} via {method}.{confidence}"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connectors::openf1_historical::RawEndpoint;
+    use serde_json::json;
+
+    #[test]
+    fn fastf1_metadata_warnings_include_schedule_resolution() {
+        let warnings = fastf1_metadata_warnings(&[RawEndpoint {
+            endpoint: "fastf1_metadata".to_string(),
+            session_key: 9999,
+            payload: json!({
+                "warnings": ["approximate match"],
+                "resolver": {
+                    "round": 4,
+                    "event_name": "Japanese Grand Prix",
+                    "match_method": "fastf1_schedule_match",
+                    "match_confidence": 0.917
+                }
+            }),
+        }]);
+
+        assert!(warnings
+            .iter()
+            .any(|message| message == "approximate match"));
+        assert!(warnings.iter().any(|message| {
+            message.contains("Japanese Grand Prix")
+                && message.contains("round 4")
+                && message.contains("fastf1_schedule_match")
+        }));
+    }
+
+    #[test]
+    fn fastf1_metadata_warnings_dedupe_connector_messages() {
+        let warnings = fastf1_metadata_warnings(&[RawEndpoint {
+            endpoint: "fastf1_metadata".to_string(),
+            session_key: 9472,
+            payload: json!({
+                "warnings": ["same", "same"],
+                "resolver": {
+                    "round": 1,
+                    "event_name": "selected event",
+                    "match_method": "curated_override",
+                    "match_confidence": 1.0
+                }
+            }),
+        }]);
+
+        assert_eq!(
+            warnings.iter().filter(|message| *message == "same").count(),
+            1
+        );
+    }
 }
 
 fn failed_ingest_response(

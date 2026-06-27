@@ -102,3 +102,8 @@ export function sessionOptions(sessions: SessionReadiness[] | undefined): Sessio
     label: `${entry.session.name} · ${sessionStatusLabel(entry)}`
   }));
 }
+
+export function selectedSessionLabel(entry: SessionReadiness | undefined): string | undefined {
+  if (!entry) return undefined;
+  return `${entry.session.year} ${entry.session.name} #${entry.session.session_key}`;
+}

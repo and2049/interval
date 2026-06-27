@@ -135,6 +135,7 @@ describe("shouldReloadSession", () => {
   test("distinguishes same-session reload from session switch", () => {
     expect(shouldReloadSession(9472, 9472)).toBe(true);
     expect(shouldReloadSession(9839, 9472)).toBe(false);
+    expect(shouldReloadSession(undefined, 9472)).toBe(false);
   });
 });
 
@@ -143,6 +144,7 @@ describe("replay resource gating", () => {
     expect(replayResourceSessionKey(9472, metadata(9472))).toBe(9472);
     expect(replayResourceSessionKey(9839, metadata(9472))).toBeUndefined();
     expect(replayResourceSessionKey(9472, undefined)).toBeUndefined();
+    expect(replayResourceSessionKey(undefined, metadata(9472))).toBeUndefined();
   });
 
   test("builds snapshot requests only from active-session metadata", () => {
@@ -155,10 +157,13 @@ describe("replay resource gating", () => {
   test("filters stale resource values by active session", () => {
     expect(activeReplayMetadata(9472, metadata(9472))?.session.session_key).toBe(9472);
     expect(activeReplayMetadata(9839, metadata(9472))).toBeUndefined();
+    expect(activeReplayMetadata(undefined, metadata(9472))).toBeUndefined();
     expect(activeReplaySnapshot(9472, snapshot(9472))?.cursor.session_key).toBe(9472);
     expect(activeReplaySnapshot(9839, snapshot(9472))).toBeUndefined();
+    expect(activeReplaySnapshot(undefined, snapshot(9472))).toBeUndefined();
     expect(activeTrackGeometry(9472, geometry(9472))?.session_key).toBe(9472);
     expect(activeTrackGeometry(9839, geometry(9472))).toBeUndefined();
+    expect(activeTrackGeometry(undefined, geometry(9472))).toBeUndefined();
   });
 
   test("filters stale resource errors by active session", () => {
@@ -167,6 +172,7 @@ describe("replay resource gating", () => {
     expect(activeResourceError(9472, 9472, error)).toBe(error);
     expect(activeResourceError(9839, 9472, error)).toBeUndefined();
     expect(activeResourceError(9472, undefined, error)).toBeUndefined();
+    expect(activeResourceError(undefined, 9472, error)).toBeUndefined();
     expect(activeResourceError(9472, 9472, undefined)).toBeUndefined();
   });
 
@@ -175,6 +181,7 @@ describe("replay resource gating", () => {
     expect(activeResourceLoading(9472, 9472, false)).toBe(false);
     expect(activeResourceLoading(9839, 9472, true)).toBe(false);
     expect(activeResourceLoading(9472, undefined, true)).toBe(false);
+    expect(activeResourceLoading(undefined, 9472, true)).toBe(false);
   });
 });
 
@@ -205,21 +212,32 @@ describe("replayLoadMessage", () => {
     expect(
       replayLoadMessage({
         metadataError: new Error("resource not found"),
-        sessionKey: 9472,
-        preferredHistoricalSessionKey: 9472
+        sessionKey: 9472
       })
-    ).toBe("Bahrain replay is not cached yet. Choose INGEST + OPEN to fetch FastF1 data.");
+    ).toBe("Replay is not cached yet. Choose INGEST + OPEN for this session.");
     expect(
       replayLoadMessage({
         metadataError: "404 Not Found",
         sessionKey: 42,
-        preferredHistoricalSessionKey: 9472
+        selectedSessionLabel: "2025 Race #42"
       })
-    ).toBe("Replay is not cached yet. Choose INGEST + OPEN for this session.");
+    ).toBe("No cached replay for selected race: 2025 Race #42. Choose INGEST + OPEN.");
+  });
+
+  test("explains empty selection and selected uncached states", () => {
+    expect(replayLoadMessage({ sessionKey: undefined })).toBe(
+      "Select a historical race, then choose INGEST + OPEN."
+    );
+    expect(
+      replayLoadMessage({
+        sessionKey: undefined,
+        selectedSessionLabel: "2025 Race #1234"
+      })
+    ).toBe("No cached replay for selected race: 2025 Race #1234. Choose INGEST + OPEN.");
   });
 
   test("distinguishes metadata and frame loading states", () => {
-    expect(replayLoadMessage({})).toBe("Connecting to replay cache...");
+    expect(replayLoadMessage({ sessionKey: 9472 })).toBe("Connecting to replay cache...");
     expect(replayLoadMessage({ metadata: metadata(9472) })).toBe("Loading replay frame...");
   });
 });

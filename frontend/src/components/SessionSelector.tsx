@@ -20,6 +20,7 @@ import {
   readinessForSession,
   shouldSyncActiveSessionSelection,
   meetingOptions,
+  selectedSessionLabel,
   seasonOptions,
   sessionOptions
 } from "../lib/sessionSelection";
@@ -27,11 +28,12 @@ import { SelectField } from "./SelectField";
 
 interface SessionSelectorProps {
   activeSession?: Session;
-  activeSessionKey: number;
+  activeSessionKey?: number;
   preferredSeason?: number;
   preferredMeeting?: number;
   preferredSession?: number;
   onOpenSession: (sessionKey: number) => void;
+  onSelectionChange?: (selection: { sessionKey?: number; label?: string }) => void;
 }
 
 export function SessionSelector(props: SessionSelectorProps) {
@@ -102,6 +104,13 @@ export function SessionSelector(props: SessionSelectorProps) {
 
   const selectedReadiness = () =>
     readinessForSession(sessions(), selectedSession());
+
+  createEffect(() => {
+    props.onSelectionChange?.({
+      sessionKey: selectedSession(),
+      label: selectedSessionLabel(selectedReadiness())
+    });
+  });
 
   const openSelected = async () => {
     const key = selectedSession();

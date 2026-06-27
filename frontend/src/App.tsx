@@ -1,4 +1,4 @@
-import { Show } from "solid-js";
+import { createSignal, Show } from "solid-js";
 import { ReplayControls } from "./components/ReplayControls";
 import { SessionSelector } from "./components/SessionSelector";
 import { SidePanels } from "./components/SidePanels";
@@ -6,27 +6,21 @@ import { StintTimeline } from "./components/StintTimeline";
 import { TimingTower } from "./components/TimingTower";
 import { TrackMap } from "./components/TrackMap";
 import { replayLoadMessage } from "./lib/replayPlayback";
-import {
-  MVP_HISTORICAL_MEETING_KEY,
-  MVP_HISTORICAL_SEASON,
-  MVP_HISTORICAL_SESSION_KEY
-} from "./lib/sessionKeys";
 import { createReplayStore } from "./stores/replay";
 
 export default function App() {
   const replay = createReplayStore();
   const metadata = () => replay.activeMetadata();
   const snapshot = () => replay.activeSnapshot();
+  const [selectedSessionLabel, setSelectedSessionLabel] = createSignal<string>();
 
   return (
     <main class="h-screen overflow-hidden bg-carbon text-slate-100">
       <SessionSelector
         activeSession={metadata()?.session}
         activeSessionKey={replay.sessionKey()}
-        preferredSeason={MVP_HISTORICAL_SEASON}
-        preferredMeeting={MVP_HISTORICAL_MEETING_KEY}
-        preferredSession={MVP_HISTORICAL_SESSION_KEY}
         onOpenSession={replay.openSession}
+        onSelectionChange={(selection) => setSelectedSessionLabel(selection.label)}
       />
       <Show
         when={metadata() && snapshot()}
@@ -40,7 +34,7 @@ export default function App() {
                 snapshotLoading: replay.snapshot.loading,
                 snapshotError: replay.snapshot.error,
                 sessionKey: replay.sessionKey(),
-                preferredHistoricalSessionKey: MVP_HISTORICAL_SESSION_KEY
+                selectedSessionLabel: selectedSessionLabel()
               })}
             </div>
           </div>
