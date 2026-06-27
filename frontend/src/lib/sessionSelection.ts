@@ -99,11 +99,22 @@ export function meetingOptions(meetings: Meeting[] | undefined): SessionSelectOp
 export function sessionOptions(sessions: SessionReadiness[] | undefined): SessionSelectOption[] {
   return (sessions ?? []).map((entry) => ({
     value: entry.session.session_key,
-    label: `${entry.session.name} · ${sessionStatusLabel(entry)}`
+    label: `${sessionDisplayName(entry.session)} · ${sessionStatusLabel(entry)}`
   }));
 }
 
 export function selectedSessionLabel(entry: SessionReadiness | undefined): string | undefined {
   if (!entry) return undefined;
-  return `${entry.session.year} ${entry.session.name} #${entry.session.session_key}`;
+  return `${entry.session.year} ${sessionDisplayName(entry.session)} #${entry.session.session_key}`;
+}
+
+export function sessionTypeLabel(session: Session): string {
+  return session.session_type === "sprint" ? "SPRINT" : "RACE";
+}
+
+export function sessionDisplayName(session: Session): string {
+  const typeLabel = sessionTypeLabel(session);
+  return session.name.trim().toLowerCase() === session.session_type
+    ? typeLabel
+    : `${typeLabel} ${session.name}`;
 }

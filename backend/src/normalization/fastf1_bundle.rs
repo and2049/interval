@@ -359,6 +359,10 @@ mod tests {
                 json!([{ "driver_number": 1, "t": 223.0, "position": 1 }]),
             ),
             raw(
+                "fastf1_intervals",
+                json!([{ "driver_number": 1, "t": 223.0, "gap_to_leader": null, "interval": null }]),
+            ),
+            raw(
                 "fastf1_geometry",
                 json!({ "centerline": [[0.0, 0.0], [10.0, 0.0]] }),
             ),
@@ -382,6 +386,8 @@ mod tests {
         assert_eq!(data.locations[0].x, 10.0);
         assert_eq!(data.geometry_locations.len(), 2);
         assert_eq!(data.positions[0].position, 1);
+        assert_eq!(data.intervals[0].t, 223.0);
+        assert_eq!(data.intervals[0].gap_to_leader, None);
     }
 
     fn raw(endpoint: &str, payload: Value) -> RawEndpoint {

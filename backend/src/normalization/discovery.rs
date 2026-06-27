@@ -20,18 +20,32 @@ pub fn race_sessions_from_openf1(payload: Value) -> anyhow::Result<Vec<Session>>
     let rows = serde_json::from_value::<Vec<OpenF1Session>>(payload)?;
     Ok(rows
         .into_iter()
-        .filter(|row| row.session_type.eq_ignore_ascii_case("race"))
-        .map(|row| Session {
-            session_key: row.session_key,
-            meeting_key: row.meeting_key,
-            year: row.year,
-            name: row.session_name,
-            session_type: SessionType::Race,
-            start_time: row.date_start.unwrap_or_default(),
-            end_time: row.date_end.unwrap_or_default(),
-            total_laps: 0,
+        .filter_map(|row| {
+            let session_type = supported_session_type(&row.session_type, &row.session_name)?;
+            Some(Session {
+                session_key: row.session_key,
+                meeting_key: row.meeting_key,
+                year: row.year,
+                name: row.session_name,
+                session_type,
+                start_time: row.date_start.unwrap_or_default(),
+                end_time: row.date_end.unwrap_or_default(),
+                total_laps: 0,
+            })
         })
         .collect())
+}
+
+fn supported_session_type(session_type: &str, session_name: &str) -> Option<SessionType> {
+    let type_label = session_type.trim().to_lowercase();
+    let name_label = session_name.trim().to_lowercase();
+    if type_label == "race" || name_label == "race" {
+        return Some(SessionType::Race);
+    }
+    if type_label == "sprint" || name_label == "sprint" || name_label == "sprint race" {
+        return Some(SessionType::Sprint);
+    }
+    None
 }
 
 #[derive(Debug, Deserialize)]

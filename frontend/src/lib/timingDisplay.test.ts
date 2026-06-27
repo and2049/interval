@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { DriverSnapshot } from "../../../shared/types/api";
 import { compoundAbbreviation } from "./formatters";
-import { gapLabel, hasTimingRows, sectorCells } from "./timingDisplay";
+import { gapLabel, hasTimingRows, intervalLabel, sectorCells } from "./timingDisplay";
 
 describe("sectorCells", () => {
   test("pads missing sector cells to a stable three-column display", () => {
@@ -43,6 +43,11 @@ describe("timing row display helpers", () => {
     expect(gapLabel(1, null)).toBe("LEADER");
     expect(gapLabel(4, "+4.2")).toBe("+4.2");
     expect(gapLabel(4, null)).toBe("--");
+  });
+
+  test("renders provided intervals and falls back for missing values", () => {
+    expect(intervalLabel("+1.234")).toBe("+1.234");
+    expect(intervalLabel(null)).toBe("--");
   });
 });
 

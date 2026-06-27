@@ -173,6 +173,7 @@ mod tests {
 
         assert!(build.available_channels.location);
         assert!(build.available_channels.track_geometry);
+        assert!(build.available_channels.intervals);
         let metadata = metadata(&pool, session.session_key).await.unwrap().unwrap();
         assert_eq!(metadata.data_sources[0].name, "fastf1_historical");
         assert_eq!(
@@ -340,7 +341,11 @@ mod tests {
                     "centerline": (0..20).map(|idx| json!([idx as f64 * 10.0, (idx % 3) as f64])).collect::<Vec<_>>()
                 }),
             ),
-            raw(session_key, "fastf1_intervals", json!([])),
+            raw(
+                session_key,
+                "fastf1_intervals",
+                json!([{ "t": 1.0, "driver_number": 1, "gap_to_leader": null, "interval": null }]),
+            ),
             raw(session_key, "fastf1_pits", json!([])),
             raw(session_key, "fastf1_track_status", json!([])),
             raw(session_key, "fastf1_stints", json!([])),

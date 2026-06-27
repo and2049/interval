@@ -49,6 +49,20 @@ describe("channelBadges", () => {
   test("keeps unavailable channels visually muted", () => {
     expect(badgeClass("missing")).toContain("text-slate");
   });
+
+  test("adds source, cadence, and cache state badges", () => {
+    const badges = channelBadges(
+      metadata({
+        source: "fast_f1_telemetry",
+        trackReady: true,
+        dataSource: "fastf1_historical",
+        frameStepSeconds: 0.2
+      })
+    );
+
+    expect(badges[0]).toMatchObject({ label: "FastF1 · 5 Hz", tone: "ready" });
+    expect(badges[1]).toMatchObject({ label: "DEGRADED", tone: "degraded" });
+  });
 });
 
 describe("qualityBadge", () => {
@@ -70,6 +84,8 @@ describe("qualityBadge", () => {
 function metadata(options: {
   source: ReplayMetadata["track_geometry"]["source"];
   trackReady: boolean;
+  dataSource?: string;
+  frameStepSeconds?: number;
 }): ReplayMetadata {
   return {
     contract_version: "replay.v1",
@@ -84,14 +100,16 @@ function metadata(options: {
       total_laps: 57
     },
     duration_seconds: 0,
-    frame_step_seconds: 1,
+    frame_step_seconds: options.frameStepSeconds ?? 1,
     total_frames: 0,
     drivers: [],
     min_t: 0,
     max_t: 0,
     race_start_t: 0,
     generated_at: "",
-    data_sources: [],
+    data_sources: options.dataSource
+      ? [{ name: options.dataSource, mode: "historical" }]
+      : [],
     available_channels: {
       timing: true,
       location: options.source === "open_f1_location" || options.source === "fast_f1_telemetry",

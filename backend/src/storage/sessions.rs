@@ -38,9 +38,7 @@ pub async fn upsert_sessions(pool: &SqlitePool, sessions: &[Session]) -> anyhow:
         .bind(session.meeting_key)
         .bind(session.year)
         .bind(&session.name)
-        .bind(match session.session_type {
-            SessionType::Race => "race",
-        })
+        .bind(session_type_to_wire(&session.session_type))
         .bind(&session.start_time)
         .bind(&session.end_time)
         .bind(session.total_laps)
@@ -100,7 +98,7 @@ pub async fn get_meeting(pool: &SqlitePool, meeting_key: i64) -> sqlx::Result<Op
 }
 
 pub async fn list_sessions(pool: &SqlitePool, meeting_key: i64) -> sqlx::Result<Vec<Session>> {
-    sqlx::query("SELECT session_key, meeting_key, year, name, session_type, start_time, end_time, total_laps FROM sessions WHERE meeting_key = ? AND session_type = 'race' ORDER BY start_time")
+    sqlx::query("SELECT session_key, meeting_key, year, name, session_type, start_time, end_time, total_laps FROM sessions WHERE meeting_key = ? AND session_type IN ('race', 'sprint') ORDER BY start_time")
         .bind(meeting_key)
         .fetch_all(pool)
         .await
@@ -121,7 +119,7 @@ pub async fn list_session_readiness(
         FROM sessions s
         LEFT JOIN ingest_status i ON i.session_key = s.session_key
         LEFT JOIN replay_metadata m ON m.session_key = s.session_key
-        WHERE s.meeting_key = ? AND s.session_type = 'race'
+        WHERE s.meeting_key = ? AND s.session_type IN ('race', 'sprint')
         ORDER BY s.start_time
         "#,
     )
@@ -146,7 +144,7 @@ fn session_from_row(row: sqlx::sqlite::SqliteRow) -> Session {
         meeting_key: row.get("meeting_key"),
         year: row.get("year"),
         name: row.get("name"),
-        session_type: SessionType::Race,
+        session_type: session_type_from_wire(&row.get::<String, _>("session_type")),
         start_time: row.get("start_time"),
         end_time: row.get("end_time"),
         total_laps: row.get("total_laps"),
@@ -159,7 +157,7 @@ fn session_readiness_from_row(row: sqlx::sqlite::SqliteRow) -> SessionReadiness 
         meeting_key: row.get("meeting_key"),
         year: row.get("year"),
         name: row.get("name"),
-        session_type: SessionType::Race,
+        session_type: session_type_from_wire(&row.get::<String, _>("session_type")),
         start_time: row.get("start_time"),
         end_time: row.get("end_time"),
         total_laps: row.get("total_laps"),
@@ -178,5 +176,19 @@ fn session_readiness_from_row(row: sqlx::sqlite::SqliteRow) -> SessionReadiness 
         replay_ready,
         last_error: row.get("last_error"),
         session,
+    }
+}
+
+fn session_type_to_wire(session_type: &SessionType) -> &'static str {
+    match session_type {
+        SessionType::Race => "race",
+        SessionType::Sprint => "sprint",
+    }
+}
+
+fn session_type_from_wire(value: &str) -> SessionType {
+    match value {
+        "sprint" => SessionType::Sprint,
+        _ => SessionType::Race,
     }
 }

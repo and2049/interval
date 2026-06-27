@@ -1,8 +1,8 @@
 # Interval
 
-Replay-first F1 second-screen dashboard for historical race sessions.
+Replay-first F1 second-screen dashboard for historical race and sprint sessions.
 
-The MVP target is historical race replay using FastF1 data cached in SQLite, backend-owned replay snapshots, and a dense engineer-inspired SolidJS dashboard. The 2024 Bahrain Grand Prix race (`session_key=9472`) remains the seeded example and resolver override.
+The MVP target is historical race and sprint replay using FastF1 data cached in SQLite, backend-owned replay snapshots, and a dense engineer-inspired SolidJS dashboard. The 2024 Bahrain Grand Prix race (`session_key=9472`) remains the seeded example and resolver override.
 
 ## Current Shape
 
@@ -16,9 +16,9 @@ The reference `docs/f1-race-replay` project is used for modeling ideas only. Thi
 
 ## MVP Replay Path
 
-The frontend opens the last selected cached session when available. If that replay is missing or stale, the app clears the active replay and leaves the selector in control instead of falling back to Bahrain. If a selected historical replay is not cached yet, the dashboard prompts the user to choose `INGEST + OPEN`. The seeded Bahrain race (`session_key=9472`) remains available as a known-good FastF1 override, and the seeded demo replay (`session_key=9839`) remains available for offline UI development.
+The frontend opens the last selected cached session when available. If that replay is missing or stale, the app clears the active replay and leaves the selector in control instead of falling back to Bahrain. Selecting a race meeting or session is active intent: cached replays open automatically, and uncached historical race or sprint sessions start FastF1 ingest automatically before opening. The seeded Bahrain race (`session_key=9472`) remains available as a known-good FastF1 override, and the seeded demo replay (`session_key=9839`) remains available for offline UI development.
 
-For historical replays, FastF1 telemetry is the preferred source for driver locations and track geometry. Race ingest resolves OpenF1 meeting/session metadata to a FastF1 year, round, and race session code, with curated overrides for known special cases. For older cached OpenF1 data, the backend still:
+For historical replays, FastF1 telemetry is the preferred source for driver locations and track geometry. Race and sprint ingest resolves OpenF1 meeting/session metadata to a FastF1 year, round, and session code, with curated overrides for known special cases. For older cached OpenF1 data, the backend still:
 
 - prefers usable upstream location geometry when present;
 - falls back to curated Bahrain geometry for `session_key=9472`;
@@ -58,7 +58,7 @@ curl "http://127.0.0.1:4000/api/sessions/9472/replay/snapshot?t=600"
 curl http://127.0.0.1:4000/api/sessions/9472/track/geometry
 ```
 
-If Bahrain has not been ingested in the local database, use the session selector in the app and choose `INGEST + OPEN`.
+If Bahrain has not been ingested in the local database, select it in the app; the frontend will start ingest automatically. The manual selector button remains available for retry/reload.
 
 ## Runtime Configuration
 

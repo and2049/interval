@@ -1,4 +1,4 @@
-export type SessionType = "race";
+export type SessionType = "race" | "sprint";
 export type SectorStatus = "personal_best" | "overall_best" | "normal" | "unknown";
 export type TyreCompound = "SOFT" | "MEDIUM" | "HARD" | "INTERMEDIATE" | "WET" | "UNKNOWN";
 export type DriverStatus = "on_track" | "pit" | "out";

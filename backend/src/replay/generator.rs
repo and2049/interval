@@ -122,7 +122,7 @@ mod tests {
             Driver, MapMode, Stint, TrackGeometryQuality, TrackGeometrySource, TrackPositionSample,
             TyreCompound,
         },
-        normalization::{LapRecord, PositionRecord, SessionResult},
+        normalization::{IntervalRecord, LapRecord, PositionRecord, SessionResult},
     };
 
     #[test]
@@ -275,6 +275,76 @@ mod tests {
     }
 
     #[test]
+    fn fastf1_intervals_populate_timing_gaps() {
+        let session = Session {
+            session_key: 1,
+            meeting_key: 1,
+            year: 2024,
+            name: "Race".to_string(),
+            session_type: crate::domain::SessionType::Race,
+            start_time: String::new(),
+            end_time: String::new(),
+            total_laps: 1,
+        };
+        let leader = Driver {
+            driver_number: 4,
+            code: "NOR".to_string(),
+            full_name: "Lando Norris".to_string(),
+            team_name: "McLaren".to_string(),
+            team_colour: "FF8000".to_string(),
+        };
+        let follower = Driver {
+            driver_number: 81,
+            code: "PIA".to_string(),
+            full_name: "Oscar Piastri".to_string(),
+            team_name: "McLaren".to_string(),
+            team_colour: "FF8000".to_string(),
+        };
+        let data = RaceData {
+            source: crate::normalization::RaceDataSource::FastF1Historical,
+            drivers: vec![leader, follower],
+            laps: vec![lap_record(4, 1, 0.0, 90.0), lap_record(81, 1, 0.0, 90.0)],
+            intervals: vec![
+                IntervalRecord {
+                    t: 1.0,
+                    driver_number: 4,
+                    gap_to_leader: None,
+                    interval: None,
+                },
+                IntervalRecord {
+                    t: 1.0,
+                    driver_number: 81,
+                    gap_to_leader: Some("+2.500".to_string()),
+                    interval: Some("+2.500".to_string()),
+                },
+            ],
+            positions: vec![position_record(4, 1.0, 1), position_record(81, 1.0, 2)],
+            locations: vec![],
+            geometry_locations: vec![],
+            pits: vec![],
+            race_control: vec![],
+            stints: vec![],
+            weather: vec![],
+            session_results: vec![],
+        };
+
+        let generated = generate_replay(session, data).unwrap();
+        let snapshot = generated
+            .snapshots
+            .iter()
+            .find(|snapshot| (snapshot.cursor.t - 1.0).abs() < f64::EPSILON)
+            .expect("snapshot at interval time");
+
+        assert!(generated.metadata.available_channels.intervals);
+        assert_eq!(snapshot.timing.rows[0].gap_to_leader, None);
+        assert_eq!(
+            snapshot.timing.rows[1].gap_to_leader.as_deref(),
+            Some("+2.500")
+        );
+        assert_eq!(snapshot.timing.rows[1].interval.as_deref(), Some("+2.500"));
+    }
+
+    #[test]
     fn bahrain_without_location_uses_projected_track_positions() {
         let session = Session {
             session_key: crate::replay::BAHRAIN_SESSION_KEY,
@@ -398,5 +468,43 @@ mod tests {
         assert!(payload.get("track_status").is_none());
         assert!(payload.get("drivers").is_none());
         assert!(payload.get("positions").is_none());
+    }
+
+    fn lap_record(
+        driver_number: i32,
+        lap_number: i32,
+        t_start: f64,
+        lap_duration: f64,
+    ) -> LapRecord {
+        LapRecord {
+            t_start,
+            lap: crate::domain::Lap {
+                driver_number,
+                lap_number,
+                lap_duration: Some(lap_duration),
+                sector_1: None,
+                sector_2: None,
+                sector_3: None,
+                is_pit_out_lap: false,
+            },
+        }
+    }
+
+    fn position_record(driver_number: i32, t: f64, position: i32) -> PositionRecord {
+        PositionRecord {
+            t,
+            position,
+            rank_source: crate::domain::RankSource::FastF1Position,
+            sample: TrackPositionSample {
+                driver_number,
+                x: 0.0,
+                y: 0.0,
+                z: None,
+                relative_distance: None,
+                source: crate::domain::TrackPositionSource::Schematic,
+                quality: crate::domain::TrackPositionQuality::Missing,
+                stale_seconds: None,
+            },
+        }
     }
 }

@@ -128,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn filters_race_sessions() {
+    fn filters_supported_replay_sessions() {
         let sessions = race_sessions_from_openf1(json!([
             {
                 "session_key": 1,
@@ -137,6 +137,24 @@ mod tests {
                 "session_type": "Qualifying",
                 "date_start": "2023-01-01T12:00:00+00:00",
                 "date_end": "2023-01-01T13:00:00+00:00",
+                "year": 2023
+            },
+            {
+                "session_key": 3,
+                "meeting_key": 10,
+                "session_name": "Sprint Qualifying",
+                "session_type": "Sprint Qualifying",
+                "date_start": "2023-01-01T16:00:00+00:00",
+                "date_end": "2023-01-01T17:00:00+00:00",
+                "year": 2023
+            },
+            {
+                "session_key": 4,
+                "meeting_key": 10,
+                "session_name": "Sprint",
+                "session_type": "Sprint",
+                "date_start": "2023-01-01T18:00:00+00:00",
+                "date_end": "2023-01-01T19:00:00+00:00",
                 "year": 2023
             },
             {
@@ -151,8 +169,11 @@ mod tests {
         ]))
         .unwrap();
 
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_key, 2);
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_key, 4);
+        assert_eq!(sessions[0].session_type, SessionType::Sprint);
+        assert_eq!(sessions[1].session_key, 2);
+        assert_eq!(sessions[1].session_type, SessionType::Race);
     }
 
     #[test]

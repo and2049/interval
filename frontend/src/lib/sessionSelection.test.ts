@@ -11,6 +11,7 @@ import {
   selectedSessionLabel,
   shouldSyncActiveSessionSelection,
   seasonOptions,
+  sessionDisplayName,
   sessionOptions
 } from "./sessionSelection";
 
@@ -62,7 +63,10 @@ describe("readinessForSession", () => {
 
 describe("selectedSessionLabel", () => {
   test("formats selected session context for empty replay messages", () => {
-    expect(selectedSessionLabel(readiness(9472))).toBe("2024 Race #9472");
+    expect(selectedSessionLabel(readiness(9472))).toBe("2024 RACE #9472");
+    expect(selectedSessionLabel(readiness(9473, { session_type: "sprint", name: "Sprint" }))).toBe(
+      "2024 SPRINT #9473"
+    );
     expect(selectedSessionLabel(undefined)).toBeUndefined();
   });
 });
@@ -140,11 +144,20 @@ describe("select option builders", () => {
 
   test("include readiness state in session option labels", () => {
     expect(sessionOptions([readiness(9472, { replay_ready: true })])).toEqual([
-      { value: 9472, label: "Race · ready" }
+      { value: 9472, label: "RACE · ready" }
     ]);
     expect(sessionOptions([readiness(9839, { is_demo: true })])).toEqual([
-      { value: 9839, label: "Race · demo" }
+      { value: 9839, label: "RACE · demo" }
     ]);
+    expect(sessionOptions([readiness(9473, { session_type: "sprint", name: "Sprint" })])).toEqual([
+      { value: 9473, label: "SPRINT · not ingested" }
+    ]);
+  });
+
+  test("keeps custom session names after the type label", () => {
+    expect(sessionDisplayName(readiness(9473, { session_type: "sprint", name: "Sprint Race" }).session)).toBe(
+      "SPRINT Sprint Race"
+    );
   });
 });
 
@@ -160,15 +173,20 @@ function meeting(meetingKey: number): Meeting {
 
 function readiness(
   sessionKey: number,
-  overrides: Partial<Pick<SessionReadiness, "ingest_status" | "replay_ready" | "is_demo">> = {}
+  overrides: Partial<
+    Pick<SessionReadiness, "ingest_status" | "replay_ready" | "is_demo"> & {
+      session_type: SessionReadiness["session"]["session_type"];
+      name: string;
+    }
+  > = {}
 ): SessionReadiness {
   return {
     session: {
       session_key: sessionKey,
       meeting_key: 1229,
       year: 2024,
-      name: "Race",
-      session_type: "race",
+      name: overrides.name ?? "Race",
+      session_type: overrides.session_type ?? "race",
       start_time: "",
       end_time: "",
       total_laps: 57

@@ -9,6 +9,8 @@ export interface ChannelBadge {
 export function channelBadges(metadata: ReplayMetadata): ChannelBadge[] {
   const mapMode = mapModeLabel(mapModeFromGeometry(metadata));
   return [
+    sourceBadge(metadata),
+    cacheBadge(metadata),
     badge("TIMING", metadata.available_channels.timing),
     badge("GPS", metadata.available_channels.location),
     {
@@ -26,6 +28,38 @@ export function channelBadges(metadata: ReplayMetadata): ChannelBadge[] {
     badge("PIT", metadata.available_channels.pit_events),
     badge("INT", metadata.available_channels.intervals)
   ];
+}
+
+function sourceBadge(metadata: ReplayMetadata): ChannelBadge {
+  const source = metadata.data_sources[0]?.name;
+  const label = `${sourceLabel(source)} · ${cadenceLabel(metadata.frame_step_seconds)}`;
+  return { label, ready: true, tone: source === "fastf1_historical" ? "ready" : "degraded" };
+}
+
+function cacheBadge(metadata: ReplayMetadata): ChannelBadge {
+  const degraded = Object.values(metadata.available_channels).some((ready) => !ready);
+  return { label: degraded ? "DEGRADED" : "CACHED", ready: true, tone: degraded ? "degraded" : "ready" };
+}
+
+function sourceLabel(source?: string) {
+  switch (source) {
+    case "fastf1_historical":
+      return "FastF1";
+    case "openf1_historical":
+      return "OpenF1";
+    case "demo":
+      return "Demo";
+    case "mixed":
+      return "Mixed";
+    default:
+      return "Replay";
+  }
+}
+
+function cadenceLabel(frameStepSeconds: number) {
+  if (!Number.isFinite(frameStepSeconds) || frameStepSeconds <= 0) return "? Hz";
+  const hz = 1 / frameStepSeconds;
+  return `${Number.isInteger(hz) ? hz.toFixed(0) : hz.toFixed(1)} Hz`;
 }
 
 function mapModeFromGeometry(metadata: ReplayMetadata): MapMode | undefined {

@@ -222,6 +222,19 @@ export function createReplayStore() {
       setStreamStartTime(clamped);
       void loadSnapshot(clamped);
     },
+    clearActiveSession: (nextIntentKey?: number) => {
+      if (nextIntentKey === sessionKey()) return;
+      setPlaying(false);
+      setTime(0);
+      setStreamStartTime(0);
+      setCurrentSnapshot(undefined);
+      setSnapshotError(undefined);
+      initializedSessionKey = undefined;
+      snapshotRequestId += 1;
+      stream?.close();
+      stream = undefined;
+      setSessionKey(undefined);
+    },
     openSession: (key: number) => {
       setPlaying(false);
       setTime(0);
@@ -229,7 +242,6 @@ export function createReplayStore() {
       setCurrentSnapshot(undefined);
       setSnapshotError(undefined);
       initializedSessionKey = undefined;
-      writeStoredSessionKey(key);
       if (shouldReloadSession(sessionKey(), key)) {
         void refetchMetadata();
         void refetchTrackGeometry();

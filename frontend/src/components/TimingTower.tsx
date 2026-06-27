@@ -1,7 +1,7 @@
 import { createMemo, Index, Show } from "solid-js";
 import type { ReplaySnapshot } from "../../../shared/types/api";
 import { compoundAbbreviation, compoundClass, formatLapTime, sectorClass } from "../lib/formatters";
-import { gapLabel, hasTimingRows, sectorCells } from "../lib/timingDisplay";
+import { gapLabel, hasTimingRows, intervalLabel, sectorCells } from "../lib/timingDisplay";
 import { EmptyState } from "./EmptyState";
 import { Panel } from "./Panel";
 import { QualityBadge } from "./QualityBadge";
@@ -40,7 +40,7 @@ export function TimingTower(props: { snapshot: ReplaySnapshot }) {
                 <div class="timing-cell text-timing">
                   {gapLabel(row().position, row().gap_to_leader)}
                 </div>
-                <div class="timing-cell text-slate-200">{row().interval ?? "--"}</div>
+                <div class="timing-cell text-slate-200">{intervalLabel(row().interval)}</div>
                 <Index each={sectorCells(row().sectors)}>
                   {(sector) => (
                     <div

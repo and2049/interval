@@ -14,7 +14,7 @@ Returns cached race meetings for a season.
 
 ### `GET /api/sessions?meeting_key=...`
 
-Returns race sessions for the selected meeting with replay readiness. MVP scope is race sessions only.
+Returns race and sprint sessions for the selected meeting with replay readiness. MVP scope excludes practice, qualifying, sprint qualifying, and sprint shootout.
 
 ```json
 [
@@ -39,7 +39,7 @@ Returns race sessions for the selected meeting with replay readiness. MVP scope 
 
 ### `POST /api/sessions/{session_key}/ingest`
 
-Fetches the historical FastF1 bundle for a race session, stores raw sections in SQLite, normalizes records, generates replay snapshots, and persists replay metadata/events. The backend resolves OpenF1 meeting/session metadata to a FastF1 race round, using curated overrides only for known special cases such as Bahrain `9472`.
+Fetches the historical FastF1 bundle for a race or sprint session, stores raw sections in SQLite, normalizes records, generates replay snapshots, and persists replay metadata/events. The backend resolves OpenF1 meeting/session metadata to a FastF1 round and session code, using curated overrides only for known special cases such as Bahrain `9472`.
 
 Response:
 
@@ -76,7 +76,7 @@ Response:
 
 Failure responses keep the same envelope so the frontend can show the error while session readiness records the failed ingest state. FastF1 fetch/runtime failures return `502`, fetch timeouts return `504`, and replay rebuild failures return `500` with `"status": "failed"` and an `"error"` message.
 
-The curated fixture is the 2024 Bahrain Grand Prix race (`session_key=9472`). It remains a seeded known-good example and FastF1 resolver override, not the only supported historical race. The frontend should not fall back to Bahrain when another selected replay is missing; it should keep the selected race visible and prompt for ingest. The seeded Abu Dhabi fixture (`session_key=9839`) remains an offline demo and is marked `is_demo: true` in session readiness.
+The curated fixture is the 2024 Bahrain Grand Prix race (`session_key=9472`). It remains a seeded known-good example and FastF1 resolver override, not the only supported historical replay. The frontend should not fall back to Bahrain when another selected replay is missing; selecting a cached race or sprint should open it, and selecting an uncached historical race or sprint should start ingest for that selected session while keeping it visible. The seeded Abu Dhabi fixture (`session_key=9839`) remains an offline demo and is marked `is_demo: true` in session readiness.
 
 ### `GET /api/sessions/{session_key}/replay/metadata`
 

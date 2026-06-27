@@ -43,6 +43,7 @@ pub struct Session {
 #[serde(rename_all = "snake_case")]
 pub enum SessionType {
     Race,
+    Sprint,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

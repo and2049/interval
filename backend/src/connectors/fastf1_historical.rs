@@ -1,6 +1,6 @@
 use crate::{
     connectors::openf1_historical::RawEndpoint,
-    domain::{Meeting, Session},
+    domain::{Meeting, Session, SessionType},
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -277,8 +277,8 @@ impl FastF1SessionConfig {
         session: &Session,
         meeting: Option<&Meeting>,
     ) -> Result<Self, FastF1HistoricalError> {
-        match session.session_key {
-            9472 => Ok(Self {
+        match (session.session_key, &session.session_type) {
+            (9472, SessionType::Race) => Ok(Self {
                 year: 2024,
                 round: Some(1),
                 session_code: "R",
@@ -291,11 +291,14 @@ impl FastF1SessionConfig {
                     "FastF1 resolver used curated override for session_key 9472.".to_string(),
                 ],
             }),
-            _ if session.name.eq_ignore_ascii_case("race") => match meeting {
+            (_, SessionType::Race | SessionType::Sprint) => match meeting {
                 Some(meeting) => Ok(Self {
                     year: session.year,
                     round: None,
-                    session_code: "R",
+                    session_code: match session.session_type {
+                        SessionType::Race => "R",
+                        SessionType::Sprint => "S",
+                    },
                     resolver_method: "fastf1_schedule_match",
                     event_name: Some(meeting.name.clone()),
                     country: Some(meeting.country.clone()),
@@ -308,9 +311,6 @@ impl FastF1SessionConfig {
                     session.session_key
                 ))),
             },
-            _ => Err(FastF1HistoricalError::UnsupportedSession(
-                "only race sessions are supported".to_string(),
-            )),
         }
     }
 }
@@ -423,6 +423,35 @@ mod tests {
         assert_eq!(config.event_name.as_deref(), Some("Italian Grand Prix"));
         assert_eq!(config.country.as_deref(), Some("Italy"));
         assert_eq!(config.location.as_deref(), Some("Monza"));
+    }
+
+    #[test]
+    fn sprint_session_maps_to_fastf1_sprint_code() {
+        let session = Session {
+            session_key: 20_100,
+            meeting_key: 2_400,
+            year: 2024,
+            name: "Sprint".to_string(),
+            session_type: crate::domain::SessionType::Sprint,
+            start_time: "2024-05-04T16:00:00Z".to_string(),
+            end_time: String::new(),
+            total_laps: 19,
+        };
+        let meeting = Meeting {
+            meeting_key: 2_400,
+            year: 2024,
+            name: "Miami Grand Prix".to_string(),
+            country: "United States".to_string(),
+            location: "Miami".to_string(),
+        };
+
+        let config = FastF1SessionConfig::for_session(&session, Some(&meeting)).unwrap();
+
+        assert_eq!(config.year, 2024);
+        assert_eq!(config.round, None);
+        assert_eq!(config.session_code, "S");
+        assert_eq!(config.resolver_method, "fastf1_schedule_match");
+        assert_eq!(config.event_name.as_deref(), Some("Miami Grand Prix"));
     }
 
     #[test]

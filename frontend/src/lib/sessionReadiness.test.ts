@@ -5,8 +5,10 @@ import {
   canOpenSessionAfterIngest,
   ingestOutcome,
   ingestOutcomeClass,
+  isBusySessionAction,
   sessionIngestErrorMessage,
   sessionActionLabel,
+  sessionActionStatus,
   sessionStatusBadgeText,
   sessionStatusClass,
   sessionStatusLabel,
@@ -75,7 +77,7 @@ describe("sessionActionLabel", () => {
         activeSessionKey: 9472,
         readiness: readiness({ replay_ready: true })
       })
-    ).toBe("RELOAD CACHE");
+    ).toBe("RELOAD");
 
     expect(
       sessionActionLabel({
@@ -85,6 +87,53 @@ describe("sessionActionLabel", () => {
         readiness: readiness({ replay_ready: false })
       })
     ).toBe("INGEST + OPEN");
+  });
+
+  test("labels automatic selection progress and retry states", () => {
+    expect(
+      sessionActionLabel({
+        ingestState: "checking",
+        selectedSession: 9472
+      })
+    ).toBe("CHECKING");
+    expect(
+      sessionActionLabel({
+        ingestState: "opening_cache",
+        selectedSession: 9472
+      })
+    ).toBe("OPENING");
+    expect(
+      sessionActionLabel({
+        ingestState: "opening_replay",
+        selectedSession: 9472
+      })
+    ).toBe("OPENING");
+    expect(
+      sessionActionLabel({
+        ingestState: "failed",
+        selectedSession: 9472
+      })
+    ).toBe("RETRY");
+  });
+});
+
+describe("session action state helpers", () => {
+  test("identify busy auto-open states", () => {
+    expect(isBusySessionAction("checking")).toBe(true);
+    expect(isBusySessionAction("opening_cache")).toBe(true);
+    expect(isBusySessionAction("ingesting")).toBe(true);
+    expect(isBusySessionAction("opening_replay")).toBe(true);
+    expect(isBusySessionAction("idle")).toBe(false);
+    expect(isBusySessionAction("failed")).toBe(false);
+  });
+
+  test("formats compact progress messages", () => {
+    expect(sessionActionStatus("checking")).toBe("Checking selected replay...");
+    expect(sessionActionStatus("opening_cache")).toBe("Opening cached replay...");
+    expect(sessionActionStatus("ingesting")).toBe("Ingesting selected session...");
+    expect(sessionActionStatus("opening_replay")).toBe("Opening replay...");
+    expect(sessionActionStatus("idle")).toBeUndefined();
+    expect(sessionActionStatus("failed")).toBeUndefined();
   });
 });
 

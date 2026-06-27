@@ -11,9 +11,15 @@ import re
 import sys
 from typing import Any
 
-import fastf1
 import numpy as np
 import pandas as pd
+
+try:
+    import fastf1
+except ModuleNotFoundError:
+    fastf1 = None
+
+POSITION_SAMPLE_SECONDS = 0.5
 
 
 def clean_float(value: Any) -> float | None:
@@ -87,6 +93,8 @@ def resolve_round(
             "warnings": [],
         }
 
+    if fastf1 is None:
+        raise RuntimeError("fastf1 is required to resolve FastF1 event schedules")
     schedule = fastf1.get_event_schedule(year)
     event_query = normalize_match_text(event_name)
     country_query = normalize_match_text(country)
@@ -156,6 +164,8 @@ def resolve_round(
 
 
 def load_session(year: int, round_number: int, session_code: str, cache_dir: str):
+    if fastf1 is None:
+        raise RuntimeError("fastf1 is required to load historical replay sessions")
     os.makedirs(cache_dir, exist_ok=True)
     fastf1.Cache.enable_cache(cache_dir)
     session = fastf1.get_session(year, round_number, session_code)
@@ -260,6 +270,7 @@ def export_telemetry(session) -> list[dict[str, Any]]:
             continue
         for _, lap in driver_laps.iterlaps():
             lap_number = clean_int(lap.get("LapNumber"))
+            lap_duration = seconds(lap.get("LapTime"))
             try:
                 telemetry = lap.get_telemetry()
             except Exception as exc:
@@ -277,6 +288,7 @@ def export_telemetry(session) -> list[dict[str, Any]]:
                     {
                         "driver_number": int(driver_number),
                         "lap_number": lap_number,
+                        "lap_duration": lap_duration,
                         "t": round(t, 3),
                         "x": round(x, 3),
                         "y": round(y, 3),
@@ -294,25 +306,8 @@ def export_telemetry(session) -> list[dict[str, Any]]:
 
 
 def export_positions(telemetry: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    by_time: dict[float, list[dict[str, Any]]] = {}
-    for row in telemetry:
-        if row.get("relative_distance") is None or row.get("lap_number") is None:
-            continue
-        t = round(float(row["t"]) * 2.0) / 2.0
-        by_time.setdefault(t, []).append(row)
-
     positions = []
-    for t, rows in by_time.items():
-        best_by_driver = {}
-        for row in rows:
-            driver = row["driver_number"]
-            if driver not in best_by_driver or row["t"] > best_by_driver[driver]["t"]:
-                best_by_driver[driver] = row
-        ranked = sorted(
-            best_by_driver.values(),
-            key=lambda row: (int(row.get("lap_number") or 0) + float(row.get("relative_distance") or 0.0)),
-            reverse=True,
-        )
+    for t, ranked in ranked_telemetry_frames(telemetry):
         for index, row in enumerate(ranked, start=1):
             positions.append(
                 {
@@ -323,6 +318,90 @@ def export_positions(telemetry: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
     positions.sort(key=lambda row: (row["t"], row["position"]))
     return positions
+
+
+def export_intervals(telemetry: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    intervals = []
+    for t, ranked in ranked_telemetry_frames(telemetry):
+        if not ranked:
+            continue
+        leader = ranked[0]
+        for index, row in enumerate(ranked):
+            ahead = ranked[index - 1] if index > 0 else None
+            intervals.append(
+                {
+                    "t": round(t, 3),
+                    "driver_number": row["driver_number"],
+                    "gap_to_leader": None if index == 0 else format_progress_gap(leader, row),
+                    "interval": None if ahead is None else format_progress_gap(ahead, row),
+                }
+            )
+    intervals.sort(key=lambda row: (row["t"], row["driver_number"]))
+    return intervals
+
+
+def ranked_telemetry_frames(telemetry: list[dict[str, Any]]) -> list[tuple[float, list[dict[str, Any]]]]:
+    by_time: dict[float, list[dict[str, Any]]] = {}
+    for row in telemetry:
+        if progress(row) is None:
+            continue
+        t = round(float(row["t"]) / POSITION_SAMPLE_SECONDS) * POSITION_SAMPLE_SECONDS
+        by_time.setdefault(t, []).append(row)
+
+    frames = []
+    for t, rows in by_time.items():
+        best_by_driver = {}
+        for row in rows:
+            driver = row["driver_number"]
+            if driver not in best_by_driver or row["t"] > best_by_driver[driver]["t"]:
+                best_by_driver[driver] = row
+        ranked = sorted(best_by_driver.values(), key=lambda row: progress(row) or 0.0, reverse=True)
+        frames.append((t, ranked))
+    frames.sort(key=lambda item: item[0])
+    return frames
+
+
+def progress(row: dict[str, Any]) -> float | None:
+    lap_number = row.get("lap_number")
+    relative_distance = row.get("relative_distance")
+    if lap_number is None or relative_distance is None:
+        return None
+    return int(lap_number) + float(relative_distance)
+
+
+def format_progress_gap(ahead: dict[str, Any], behind: dict[str, Any]) -> str | None:
+    ahead_progress = progress(ahead)
+    behind_progress = progress(behind)
+    if ahead_progress is None or behind_progress is None:
+        return None
+
+    progress_gap = max(0.0, ahead_progress - behind_progress)
+    lap_gap = int(math.floor(progress_gap))
+    if lap_gap >= 1:
+        return f"+{lap_gap} LAP" if lap_gap == 1 else f"+{lap_gap} LAPS"
+
+    seconds_gap = estimate_seconds_gap(ahead, behind, progress_gap)
+    if seconds_gap is None:
+        return None
+    return f"+{seconds_gap:.3f}"
+
+
+def estimate_seconds_gap(ahead: dict[str, Any], behind: dict[str, Any], progress_gap: float) -> float | None:
+    if progress_gap <= 0:
+        return 0.0
+    lap_number = int(behind.get("lap_number") or 0)
+    lap_duration = clean_float(behind.get("lap_duration"))
+    if lap_duration is not None and lap_duration > 0:
+        return progress_gap * lap_duration
+
+    speed = clean_float(behind.get("speed"))
+    if speed is not None and speed > 0:
+        ahead_progress = progress(ahead)
+        behind_progress = progress(behind)
+        if ahead_progress is not None and behind_progress is not None and ahead_progress > behind_progress:
+            return progress_gap * 90.0
+
+    return progress_gap * 90.0 if lap_number > 0 else None
 
 
 def export_weather(session) -> list[dict[str, Any]]:
@@ -441,12 +520,19 @@ def export_bundle(
     laps, stints, pits = export_laps_and_stints(session)
     telemetry = export_telemetry(session)
     warnings = resolver.get("warnings", [])
+    intervals = export_intervals(telemetry)
+    if not telemetry:
+        warnings.append("FastF1 intervals could not be derived because telemetry is missing.")
+    elif not intervals:
+        warnings.append(
+            "FastF1 intervals could not be derived because telemetry is missing relative-distance data."
+        )
     sections = {
         "drivers": export_drivers(session),
         "laps": laps,
         "telemetry": telemetry,
         "positions": export_positions(telemetry),
-        "intervals": [],
+        "intervals": intervals,
         "stints": stints,
         "pits": pits,
         "weather": export_weather(session),

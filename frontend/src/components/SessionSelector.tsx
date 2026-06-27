@@ -6,7 +6,9 @@ import {
   canOpenSessionAfterIngest,
   ingestOutcome,
   ingestOutcomeClass,
+  isBusySessionAction,
   sessionActionLabel,
+  sessionActionStatus,
   sessionIngestErrorMessage,
   sessionStatusBadgeText,
   sessionStatusClass,
@@ -33,6 +35,7 @@ interface SessionSelectorProps {
   preferredMeeting?: number;
   preferredSession?: number;
   onOpenSession: (sessionKey: number) => void;
+  onSessionIntent?: (sessionKey?: number) => void;
   onSelectionChange?: (selection: { sessionKey?: number; label?: string }) => void;
 }
 
@@ -43,16 +46,23 @@ export function SessionSelector(props: SessionSelectorProps) {
   const [ingestState, setIngestState] = createSignal<SessionActionState>("idle");
   const [ingestError, setIngestError] = createSignal<string>();
   const [lastIngest, setLastIngest] = createSignal<IngestResponse>();
+  const [sessionIntent, setSessionIntent] = createSignal(0);
+  const [meetingIntent, setMeetingIntent] = createSignal(0);
+  const [hasUserBrowsed, setHasUserBrowsed] = createSignal(false);
 
   const [seasons] = createResource(api.seasons);
   const [meetings] = createResource(selectedSeason, api.meetings);
   const [sessions, { refetch: refetchSessions }] = createResource(selectedMeeting, api.sessions);
   let lastSelectedSession: number | undefined;
   let lastActiveSessionKey: number | undefined;
+  let handledSessionIntent = 0;
+  let handledMeetingIntent = 0;
+  let sessionActionRequestId = 0;
 
   createEffect(() => {
     const active = props.activeSession;
     if (!active) return;
+    if (hasUserBrowsed() && selectedSession() !== active.session_key) return;
 
     const selected = {
       season: selectedSeason(),
@@ -112,15 +122,51 @@ export function SessionSelector(props: SessionSelectorProps) {
     });
   });
 
-  const openSelected = async () => {
+  createEffect(() => {
+    const intent = meetingIntent();
+    const key = selectedSession();
+    const readiness = selectedReadiness();
+    if (
+      intent === 0 ||
+      intent === handledMeetingIntent ||
+      sessions.loading ||
+      key == null ||
+      !readiness
+    ) {
+      return;
+    }
+
+    handledMeetingIntent = intent;
+    setSessionIntent((value) => value + 1);
+  });
+
+  createEffect(() => {
+    const intent = sessionIntent();
+    const key = selectedSession();
+    const readiness = selectedReadiness();
+    if (intent === 0 || intent === handledSessionIntent || key == null || !readiness) return;
+
+    handledSessionIntent = intent;
+    void openSelected("auto");
+  });
+
+  const openSelected = async (_source: "auto" | "manual" = "manual") => {
     const key = selectedSession();
     if (key == null) return;
+    const requestId = ++sessionActionRequestId;
     const readiness = selectedReadiness();
+    props.onSessionIntent?.(key);
+
+    setIngestState("checking");
+    setIngestError(undefined);
     if (canOpenSessionFromCache(readiness)) {
+      if (requestId !== sessionActionRequestId || selectedSession() !== key) return;
+      setIngestState("opening_cache");
       props.onOpenSession(key);
-      setIngestState("idle");
+      if (requestId !== sessionActionRequestId || selectedSession() !== key) return;
       setIngestError(undefined);
       setLastIngest(undefined);
+      setIngestState("idle");
       return;
     }
 
@@ -128,16 +174,21 @@ export function SessionSelector(props: SessionSelectorProps) {
     setIngestError(undefined);
     try {
       const response = await api.ingest(key);
+      if (requestId !== sessionActionRequestId || selectedSession() !== key) return;
       setLastIngest(response);
       await refetchSessions();
+      if (requestId !== sessionActionRequestId || selectedSession() !== key) return;
       if (canOpenSessionAfterIngest(response)) {
+        setIngestState("opening_replay");
         props.onOpenSession(key);
+        if (requestId !== sessionActionRequestId || selectedSession() !== key) return;
         setIngestState("idle");
       } else {
         setIngestError(response.error ?? "Ingest did not produce replay frames.");
         setIngestState("failed");
       }
     } catch (error) {
+      if (requestId !== sessionActionRequestId || selectedSession() !== key) return;
       setIngestError(error instanceof Error ? error.message : "Ingest failed.");
       void refetchSessions();
       setIngestState("failed");
@@ -145,6 +196,9 @@ export function SessionSelector(props: SessionSelectorProps) {
   };
 
   const chooseSeason = (season: number) => {
+    setHasUserBrowsed(true);
+    sessionActionRequestId += 1;
+    props.onSessionIntent?.();
     batch(() => {
       setSelectedSeason(season);
       setSelectedMeeting(undefined);
@@ -153,9 +207,21 @@ export function SessionSelector(props: SessionSelectorProps) {
   };
 
   const chooseMeeting = (meeting: number) => {
+    setHasUserBrowsed(true);
+    sessionActionRequestId += 1;
+    props.onSessionIntent?.();
     batch(() => {
       setSelectedMeeting(meeting);
       setSelectedSession(undefined);
+      setMeetingIntent((value) => value + 1);
+    });
+  };
+
+  const chooseSession = (session: number) => {
+    setHasUserBrowsed(true);
+    batch(() => {
+      setSelectedSession(session);
+      setSessionIntent((value) => value + 1);
     });
   };
 
@@ -200,7 +266,7 @@ export function SessionSelector(props: SessionSelectorProps) {
         value={selectedSession()}
         options={sessionOptions(sessions())}
         disabled={sessions.loading}
-        onChange={setSelectedSession}
+        onChange={chooseSession}
       />
 
       <Show when={selectedReadiness()}>
@@ -214,12 +280,15 @@ export function SessionSelector(props: SessionSelectorProps) {
       <button
         class="ml-2 border border-mint bg-mint/10 px-3 py-1 font-semibold text-mint disabled:border-line disabled:text-slate-500"
         data-testid="session-open"
-        disabled={selectedSession() == null || ingestState() === "ingesting"}
-        onClick={openSelected}
+        disabled={selectedSession() == null || isBusySessionAction(ingestState())}
+        onClick={() => void openSelected("manual")}
       >
         {actionLabel()}
       </button>
 
+      <Show when={sessionActionStatus(ingestState())}>
+        {(message) => <span class="text-amber">{message()}</span>}
+      </Show>
       <Show when={ingestState() === "failed"}>
         <span class="text-danger">
           {sessionIngestErrorMessage({

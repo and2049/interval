@@ -1,6 +1,12 @@
 import type { IngestResponse, IngestStatus, SessionReadiness } from "../../../shared/types/api";
 
-export type SessionActionState = "idle" | "ingesting" | "failed";
+export type SessionActionState =
+  | "idle"
+  | "checking"
+  | "opening_cache"
+  | "ingesting"
+  | "opening_replay"
+  | "failed";
 export type IngestOutcomeTone = "ready" | "degraded" | "failed";
 
 export interface IngestOutcome {
@@ -39,10 +45,15 @@ export function sessionActionLabel(args: {
   activeSessionKey?: number;
   readiness?: SessionReadiness;
 }) {
+  if (args.ingestState === "checking") return "CHECKING";
+  if (args.ingestState === "opening_cache" || args.ingestState === "opening_replay") {
+    return "OPENING";
+  }
   if (args.ingestState === "ingesting") return "INGESTING";
+  if (args.ingestState === "failed") return "RETRY";
   if (args.selectedSession == null) return "SELECT SESSION";
   if (args.readiness?.replay_ready || args.readiness?.is_demo) {
-    return args.selectedSession === args.activeSessionKey ? "RELOAD CACHE" : "OPEN CACHE";
+    return args.selectedSession === args.activeSessionKey ? "RELOAD" : "OPEN CACHE";
   }
   return "INGEST + OPEN";
 }
@@ -63,8 +74,33 @@ export function shouldClearTransientSessionAction(args: {
   return (
     args.previousSession !== args.selectedSession &&
     args.previousSession != null &&
-    args.ingestState !== "ingesting"
+    !isBusySessionAction(args.ingestState)
   );
+}
+
+export function isBusySessionAction(state: SessionActionState) {
+  return (
+    state === "checking" ||
+    state === "opening_cache" ||
+    state === "ingesting" ||
+    state === "opening_replay"
+  );
+}
+
+export function sessionActionStatus(state: SessionActionState): string | undefined {
+  switch (state) {
+    case "checking":
+      return "Checking selected replay...";
+    case "opening_cache":
+      return "Opening cached replay...";
+    case "ingesting":
+      return "Ingesting selected session...";
+    case "opening_replay":
+      return "Opening replay...";
+    case "failed":
+    case "idle":
+      return undefined;
+  }
 }
 
 export function sessionIngestErrorMessage(args: {

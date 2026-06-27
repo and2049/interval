@@ -20,6 +20,7 @@ export default function App() {
         activeSession={metadata()?.session}
         activeSessionKey={replay.sessionKey()}
         onOpenSession={replay.openSession}
+        onSessionIntent={replay.clearActiveSession}
         onSelectionChange={(selection) => setSelectedSessionLabel(selection.label)}
       />
       <Show
