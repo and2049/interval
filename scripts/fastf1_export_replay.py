@@ -636,3 +636,123 @@ def clean_string(value: Any) -> str | None:
     return text or None
 
 
+def export_geometry(session) -> dict[str, Any]:
+    fastest = session.laps.pick_fastest()
+    if fastest is None or fastest.empty:
+        return {"centerline": []}
+    telemetry = fastest.get_telemetry()
+    if telemetry is None or telemetry.empty:
+        return {"centerline": []}
+    points = []
+    for _, row in telemetry.iterrows():
+        x = clean_float(row.get("X"))
+        y = clean_float(row.get("Y"))
+        if x is not None and y is not None:
+            points.append([round(x, 3), round(y, 3)])
+    rotation = 0.0
+    try:
+        info = session.get_circuit_info()
+        rotation = clean_float(getattr(info, "rotation", 0.0)) or 0.0
+    except Exception:
+        rotation = 0.0
+    return {"centerline": points, "rotation_deg": rotation}
+
+
+def export_bundle(
+    year: int,
+    round_number: int | None,
+    session_code: str,
+    session_key: int,
+    cache_dir: str,
+    event_name: str | None,
+    country: str | None,
+    location: str | None,
+    session_start: str | None,
+    resolver_method: str,
+) -> dict[str, Any]:
+    resolved_round, resolver = resolve_round(
+        year, round_number, event_name, country, location, session_start
+    )
+    if resolver_method == "curated_override":
+        resolver["match_method"] = "curated_override"
+        resolver["match_confidence"] = 1.0
+    session = load_session(year, resolved_round, session_code, cache_dir)
+    laps, stints, pits = export_laps_and_stints(session)
+    telemetry = export_telemetry(session)
+    warnings = resolver.get("warnings", [])
+    intervals = export_intervals(telemetry)
+    if not telemetry:
+        warnings.append("FastF1 intervals could not be derived because telemetry is missing.")
+    elif not intervals:
+        warnings.append(
+            "FastF1 intervals could not be derived because telemetry is missing relative-distance data."
+        )
+    sections = {
+        "drivers": export_drivers(session),
+        "laps": laps,
+        "telemetry": telemetry,
+        "positions": export_positions(telemetry),
+        "intervals": intervals,
+        "stints": stints,
+        "pits": pits,
+        "weather": export_weather(session),
+        "track_status": export_track_status(session),
+        "session_result": export_session_result(session),
+        "geometry": export_geometry(session),
+    }
+    return {
+        "contract_version": "fastf1-export.v1",
+        "metadata": {
+            "source": "fastf1_historical",
+            "year": year,
+            "round": resolved_round,
+            "session": session_code,
+            "session_key": session_key,
+            "event_query": {
+                "event_name": event_name,
+                "country": country,
+                "location": location,
+                "session_start": session_start,
+            },
+            "resolver": resolver,
+            "warnings": warnings,
+        },
+        "sections": sections,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--year", type=int, required=True)
+    parser.add_argument("--round", type=int)
+    parser.add_argument("--session", required=True)
+    parser.add_argument("--session-key", type=int, required=True)
+    parser.add_argument("--event-name")
+    parser.add_argument("--country")
+    parser.add_argument("--location")
+    parser.add_argument("--session-start")
+    parser.add_argument("--resolver-method", default="provided_round")
+    parser.add_argument("--cache-dir", default="cache/fastf1")
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args()
+
+    bundle = export_bundle(
+        args.year,
+        args.round,
+        args.session,
+        args.session_key,
+        args.cache_dir,
+        args.event_name,
+        args.country,
+        args.location,
+        args.session_start,
+        args.resolver_method,
+    )
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    with open(args.output, "w", encoding="utf-8") as handle:
+        json.dump(bundle, handle, separators=(",", ":"))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
