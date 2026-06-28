@@ -264,3 +264,375 @@ def parse_datetime(value: Any) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def load_session(year: int, round_number: int, session_code: str, cache_dir: str):
+    if fastf1 is None:
+        raise RuntimeError("fastf1 is required to load historical replay sessions")
+    os.makedirs(cache_dir, exist_ok=True)
+    fastf1.Cache.enable_cache(cache_dir)
+    session = fastf1.get_session(year, round_number, session_code)
+    try:
+        session.load(telemetry=True, weather=True, messages=True)
+    except TypeError:
+        try:
+            session.load(telemetry=True, weather=True)
+        except TypeError:
+            try:
+                session.load(telemetry=True)
+            except TypeError:
+                session.load()
+    return session
+
+
+def export_drivers(session) -> list[dict[str, Any]]:
+    rows = []
+    for driver_number in session.drivers:
+        info = session.get_driver(driver_number)
+        rows.append(
+            {
+                "driver_number": int(driver_number),
+                "code": str(info.get("Abbreviation") or driver_number),
+                "full_name": str(info.get("FullName") or ""),
+                "team_name": str(info.get("TeamName") or ""),
+                "team_colour": color_without_hash(info.get("TeamColor")) or "7f8a99",
+            }
+        )
+    return rows
+
+
+def export_laps_and_stints(session) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    laps = []
+    stints_by_driver: dict[tuple[int, int, str, int], dict[str, Any]] = {}
+    pits = []
+
+    for _, lap in session.laps.iterlaps():
+        driver_number = clean_int(lap.get("DriverNumber"))
+        lap_number = clean_int(lap.get("LapNumber"))
+        if driver_number is None or lap_number is None:
+            continue
+        t_start = seconds(lap.get("LapStartTime"))
+        if t_start is None:
+            continue
+
+        compound = str(lap.get("Compound") or "UNKNOWN").upper()
+        tyre_age = clean_int(lap.get("TyreLife"))
+        stint_number = clean_int(lap.get("Stint")) or 0
+        pit_in_t = seconds(lap.get("PitInTime"))
+        pit_out_t = seconds(lap.get("PitOutTime"))
+
+        laps.append(
+            {
+                "driver_number": driver_number,
+                "lap_number": lap_number,
+                "t_start": round(t_start, 3),
+                "lap_duration": seconds(lap.get("LapTime")),
+                "sector_1": seconds(lap.get("Sector1Time")),
+                "sector_2": seconds(lap.get("Sector2Time")),
+                "sector_3": seconds(lap.get("Sector3Time")),
+                "is_pit_out_lap": pit_out_t is not None,
+            }
+        )
+
+        key = (driver_number, stint_number, compound, tyre_age or 0)
+        entry = stints_by_driver.setdefault(
+            key,
+            {
+                "driver_number": driver_number,
+                "stint_number": stint_number,
+                "compound": compound,
+                "lap_start": lap_number,
+                "lap_end": lap_number,
+                "tyre_age_at_start": tyre_age,
+            },
+        )
+        entry["lap_start"] = min(entry["lap_start"], lap_number)
+        entry["lap_end"] = max(entry["lap_end"], lap_number)
+
+        if pit_in_t is not None:
+            duration = None
+            if pit_out_t is not None and pit_out_t >= pit_in_t:
+                duration = round(pit_out_t - pit_in_t, 3)
+            pits.append(
+                {
+                    "driver_number": driver_number,
+                    "lap_number": lap_number,
+                    "t": round(pit_in_t, 3),
+                    "pit_duration": duration,
+                }
+            )
+
+    return laps, sorted(stints_by_driver.values(), key=lambda row: (row["driver_number"], row["lap_start"])), pits
+
+
+def export_telemetry(session) -> list[dict[str, Any]]:
+    rows = []
+    for driver_number in session.drivers:
+        driver_laps = session.laps.pick_drivers(driver_number)
+        if driver_laps.empty:
+            continue
+        for _, lap in driver_laps.iterlaps():
+            lap_number = clean_int(lap.get("LapNumber"))
+            lap_duration = seconds(lap.get("LapTime"))
+            try:
+                telemetry = lap.get_telemetry()
+            except Exception as exc:
+                print(f"warning: telemetry skipped for driver {driver_number} lap {lap_number}: {exc}", file=sys.stderr)
+                continue
+            if telemetry is None or telemetry.empty:
+                continue
+            for _, sample in telemetry.iterrows():
+                t = seconds(sample.get("SessionTime"))
+                x = clean_float(sample.get("X"))
+                y = clean_float(sample.get("Y"))
+                if t is None or x is None or y is None:
+                    continue
+                rows.append(
+                    {
+                        "driver_number": int(driver_number),
+                        "lap_number": lap_number,
+                        "lap_duration": lap_duration,
+                        "t": round(t, 3),
+                        "x": round(x, 3),
+                        "y": round(y, 3),
+                        "z": clean_float(sample.get("Z")),
+                        "relative_distance": clean_float(sample.get("RelativeDistance")),
+                        "speed": clean_float(sample.get("Speed")),
+                        "gear": clean_int(sample.get("nGear")),
+                        "throttle": clean_float(sample.get("Throttle")),
+                        "brake": clean_float(sample.get("Brake")),
+                        "drs": clean_int(sample.get("DRS")),
+                    }
+                )
+    rows.sort(key=lambda row: (row["t"], row["driver_number"]))
+    return rows
+
+
+def export_positions(telemetry: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    positions = []
+    for t, ranked in ranked_telemetry_frames(telemetry):
+        for index, row in enumerate(ranked, start=1):
+            positions.append(
+                {
+                    "t": round(t, 3),
+                    "driver_number": row["driver_number"],
+                    "position": index,
+                }
+            )
+    positions.sort(key=lambda row: (row["t"], row["position"]))
+    return positions
+
+
+def export_intervals(telemetry: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    intervals = []
+    for t, ranked in ranked_telemetry_frames(telemetry):
+        if not ranked:
+            continue
+        leader = ranked[0]
+        for index, row in enumerate(ranked):
+            ahead = ranked[index - 1] if index > 0 else None
+            intervals.append(
+                {
+                    "t": round(t, 3),
+                    "driver_number": row["driver_number"],
+                    "gap_to_leader": None if index == 0 else format_progress_gap(leader, row),
+                    "interval": None if ahead is None else format_progress_gap(ahead, row),
+                }
+            )
+    intervals.sort(key=lambda row: (row["t"], row["driver_number"]))
+    return intervals
+
+
+def ranked_telemetry_frames(telemetry: list[dict[str, Any]]) -> list[tuple[float, list[dict[str, Any]]]]:
+    by_time: dict[float, list[dict[str, Any]]] = {}
+    for row in telemetry:
+        if progress(row) is None:
+            continue
+        t = round(float(row["t"]) / POSITION_SAMPLE_SECONDS) * POSITION_SAMPLE_SECONDS
+        by_time.setdefault(t, []).append(row)
+
+    frames = []
+    for t, rows in by_time.items():
+        best_by_driver = {}
+        for row in rows:
+            driver = row["driver_number"]
+            if driver not in best_by_driver or row["t"] > best_by_driver[driver]["t"]:
+                best_by_driver[driver] = row
+        ranked = sorted(best_by_driver.values(), key=lambda row: progress(row) or 0.0, reverse=True)
+        frames.append((t, ranked))
+    frames.sort(key=lambda item: item[0])
+    return frames
+
+
+def progress(row: dict[str, Any]) -> float | None:
+    lap_number = row.get("lap_number")
+    relative_distance = row.get("relative_distance")
+    if lap_number is None or relative_distance is None:
+        return None
+    return int(lap_number) + float(relative_distance)
+
+
+def format_progress_gap(ahead: dict[str, Any], behind: dict[str, Any]) -> str | None:
+    ahead_progress = progress(ahead)
+    behind_progress = progress(behind)
+    if ahead_progress is None or behind_progress is None:
+        return None
+
+    progress_gap = max(0.0, ahead_progress - behind_progress)
+    lap_gap = int(math.floor(progress_gap))
+    if lap_gap >= 1:
+        return f"+{lap_gap} LAP" if lap_gap == 1 else f"+{lap_gap} LAPS"
+
+    seconds_gap = estimate_seconds_gap(ahead, behind, progress_gap)
+    if seconds_gap is None:
+        return None
+    return f"+{seconds_gap:.3f}"
+
+
+def estimate_seconds_gap(ahead: dict[str, Any], behind: dict[str, Any], progress_gap: float) -> float | None:
+    if progress_gap <= 0:
+        return 0.0
+    lap_number = int(behind.get("lap_number") or 0)
+    lap_duration = clean_float(behind.get("lap_duration"))
+    if lap_duration is not None and lap_duration > 0:
+        return progress_gap * lap_duration
+
+    speed = clean_float(behind.get("speed"))
+    if speed is not None and speed > 0:
+        ahead_progress = progress(ahead)
+        behind_progress = progress(behind)
+        if ahead_progress is not None and behind_progress is not None and ahead_progress > behind_progress:
+            return progress_gap * 90.0
+
+    return progress_gap * 90.0 if lap_number > 0 else None
+
+
+def export_weather(session) -> list[dict[str, Any]]:
+    weather = getattr(session, "weather_data", None)
+    if weather is None or weather.empty:
+        return []
+    rows = []
+    for _, row in weather.iterrows():
+        t = seconds(row.get("Time"))
+        if t is None:
+            continue
+        rows.append(
+            {
+                "t": round(t, 3),
+                "air_temp": clean_float(row.get("AirTemp")),
+                "track_temp": clean_float(row.get("TrackTemp")),
+                "humidity": clean_float(row.get("Humidity")),
+                "rainfall": clean_float(row.get("Rainfall")),
+                "wind_direction": clean_int(row.get("WindDirection")),
+                "wind_speed": clean_float(row.get("WindSpeed")),
+            }
+        )
+    return rows
+
+
+def export_track_status(session) -> list[dict[str, Any]]:
+    status = getattr(session, "track_status", None)
+    if status is None or status.empty:
+        return []
+    rows = []
+    for _, row in status.iterrows():
+        t = seconds(row.get("Time"))
+        if t is None:
+            continue
+        raw = str(row.get("Status") or "")
+        flag = {
+            "1": "green",
+            "2": "yellow",
+            "4": "safety_car",
+            "5": "red",
+            "6": "virtual_safety_car",
+            "7": "virtual_safety_car_ending",
+        }.get(raw, raw.lower() or None)
+        rows.append(
+            {
+                "t": round(t, 3),
+                "category": "track_status",
+                "message": f"Track status {raw}",
+                "flag": flag,
+                "scope": None,
+            }
+        )
+    return rows
+
+
+def export_session_result(session) -> list[dict[str, Any]]:
+    results = getattr(session, "results", None)
+    if results is None or results.empty:
+        return []
+    rows = []
+    for _, row in results.iterrows():
+        driver_number = clean_int(row.get("DriverNumber"))
+        if driver_number is None:
+            continue
+        rows.append(
+            {
+                "driver_number": driver_number,
+                "position": clean_int(row.get("Position")),
+                "dnf": is_dnf_status(row.get("Status")),
+                "dns": is_dns_status(row.get("Status")),
+                "dsq": is_dsq_status(row.get("Status")),
+                "status": clean_string(row.get("Status")),
+            }
+        )
+    return rows
+
+
+def is_dnf_status(value: Any) -> bool:
+    status = normalize_status(value)
+    if not status or is_dns_status(status) or is_dsq_status(status):
+        return False
+    if status in {"finished", "classified"}:
+        return False
+    if status.startswith("+") or status.isdigit():
+        return False
+    return any(
+        token in status
+        for token in (
+            "accident",
+            "collision",
+            "damage",
+            "retired",
+            "engine",
+            "gearbox",
+            "brake",
+            "hydraulics",
+            "electrical",
+            "power unit",
+            "powerunit",
+            "overheating",
+            "suspension",
+            "puncture",
+            "oil",
+            "fuel",
+            "water leak",
+            "spun off",
+            "withdrawn",
+        )
+    )
+
+
+def is_dns_status(value: Any) -> bool:
+    status = normalize_status(value)
+    return status in {"dns", "did not start", "not started", "didnt start"}
+
+
+def is_dsq_status(value: Any) -> bool:
+    status = normalize_status(value)
+    return status in {"dsq", "disqualified", "excluded"} or "disqualified" in status
+
+
+def normalize_status(value: Any) -> str:
+    text = clean_string(value)
+    return text.lower().replace("_", " ").replace("-", " ").strip() if text else ""
+
+
+def clean_string(value: Any) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
