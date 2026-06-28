@@ -621,3 +621,368 @@ fn projected_relative_distance(lap: Option<&LapRecord>, rank: i32, t: f64) -> f6
     (progress - rank_offset).rem_euclid(1.0)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn track_status_uses_latest_flag_by_timestamp() {
+        let data = race_data_with_control(vec![
+            race_control(120.0, Some("green"), "green flag"),
+            race_control(60.0, Some("yellow"), "yellow flag"),
+            race_control(90.0, None, "message only"),
+        ]);
+        let index = ReplayDataIndex::new(&data);
+
+        assert_eq!(index.track_status(100.0), "yellow");
+        assert_eq!(index.track_status(130.0), "green");
+    }
+
+    #[test]
+    fn race_control_history_is_ordered_by_event_time() {
+        let data = race_data_with_control(vec![
+            race_control(120.0, Some("green"), "green flag"),
+            race_control(60.0, Some("yellow"), "yellow flag"),
+            race_control(90.0, None, "message only"),
+        ]);
+        let index = ReplayDataIndex::new(&data);
+
+        let history = index.race_control_history(120.0);
+
+        assert_eq!(
+            history
+                .iter()
+                .map(|event| event.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["yellow flag", "message only", "green flag"]
+        );
+    }
+
+    #[test]
+    fn race_control_history_keeps_recent_snapshot_window() {
+        let data = race_data_with_control(
+            (0..20)
+                .map(|idx| race_control(idx as f64, None, &format!("message {idx}")))
+                .collect(),
+        );
+        let index = ReplayDataIndex::new(&data);
+
+        let history = index.race_control_history(20.0);
+
+        assert_eq!(history.len(), SNAPSHOT_RACE_CONTROL_LIMIT);
+        assert_eq!(history[0].message, "message 8");
+        assert_eq!(
+            history.last().map(|event| event.message.as_str()),
+            Some("message 19")
+        );
+    }
+
+    #[test]
+    fn pace_statuses_classify_overall_and_personal_bests_at_time_t() {
+        let lap = |driver: i32, number: i32, t_start: f64, s1: f64, duration: f64| LapRecord {
+            t_start,
+            lap: crate::domain::Lap {
+                driver_number: driver,
+                lap_number: number,
+                lap_duration: Some(duration),
+                sector_1: Some(s1),
+                sector_2: None,
+                sector_3: None,
+                is_pit_out_lap: false,
+            },
+        };
+        // Driver 1 improves then slows; driver 2 holds the overall best throughout.
+        let laps = vec![
+            lap(1, 1, 0.0, 26.0, 92.0),
+            lap(2, 1, 0.0, 25.0, 90.0),
+            lap(1, 2, 100.0, 25.5, 91.0),
+            lap(1, 3, 200.0, 27.0, 93.0),
+        ];
+
+        let (by_driver, overall) = best_times(&laps, 150.0);
+        assert_eq!(overall.lap, Some(90.0));
+        // At t=150 driver 1's lap 2 (91.0) is their personal best but not overall.
+        let d1 = by_driver.get(&1).unwrap();
+        assert_eq!(
+            pace_status(Some(91.0), d1.lap, overall.lap),
+            SectorStatus::PersonalBest
+        );
+        assert_eq!(
+            pace_status(Some(90.0), by_driver.get(&2).unwrap().lap, overall.lap),
+            SectorStatus::OverallBest
+        );
+
+        // At t=250 driver 1's latest lap (93.0) beats nothing.
+        let (by_driver, overall) = best_times(&laps, 250.0);
+        assert_eq!(
+            pace_status(Some(93.0), by_driver.get(&1).unwrap().lap, overall.lap),
+            SectorStatus::Normal
+        );
+        // Missing time stays unknown.
+        assert_eq!(
+            pace_status(None, by_driver.get(&1).unwrap().lap, overall.lap),
+            SectorStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn track_positions_use_relative_distance_on_centerline() {
+        let data = race_data_with_locations(
+            vec![
+                location(1.0, 4, 999.0, 999.0, Some(0.20)),
+                location(1.5, 4, 999.0, 999.0, Some(0.30)),
+            ],
+            vec![],
+        );
+        let index = ReplayDataIndex::new(&data);
+
+        let positions = index.track_positions(&test_geometry(), 1.25);
+
+        assert_eq!(
+            positions[0].quality,
+            crate::domain::TrackPositionQuality::Interpolated
+        );
+        assert_eq!(
+            positions[0].source,
+            crate::domain::TrackPositionSource::Interpolated
+        );
+        assert!(positions[0].x > 20.0 && positions[0].x < 30.0);
+        assert_eq!(positions[0].y, 0.0);
+        assert!(positions[0].relative_distance.unwrap() > 0.20);
+    }
+
+    #[test]
+    fn stale_dnf_driver_freezes_after_final_location() {
+        let data = race_data_with_locations(
+            vec![location(1.0, 4, 10.0, 0.0, Some(0.10))],
+            vec![SessionResult {
+                driver_number: 4,
+                position: Some(20),
+                dnf: true,
+                dns: false,
+                dsq: false,
+            }],
+        );
+        let index = ReplayDataIndex::new(&data);
+
+        let fresh_rows = index.timing_rows(2.0);
+        let stale_rows = index.timing_rows(4.0);
+        let positions = index.track_positions(&test_geometry(), 4.0);
+
+        assert_eq!(fresh_rows[0].status, DriverStatus::OnTrack);
+        assert_eq!(stale_rows[0].status, DriverStatus::Out);
+        assert_eq!(
+            positions[0].quality,
+            crate::domain::TrackPositionQuality::Stale
+        );
+        assert_eq!(positions[0].stale_seconds, Some(3.0));
+    }
+
+    fn moving_driver(driver_number: i32, until_t: f64) -> Vec<LocationRecord> {
+        // One sample a second, a car length further along each time.
+        (0..=(until_t as i32))
+            .map(|second| location(second as f64, driver_number, second as f64 * 50.0, 0.0, None))
+            .collect()
+    }
+
+    fn parked_driver(driver_number: i32, until_t: f64) -> Vec<LocationRecord> {
+        (0..=(until_t as i32))
+            .map(|second| location(second as f64, driver_number, -1337.0, -1950.0, None))
+            .collect()
+    }
+
+    fn race_data_with_field(drivers: &[i32], locations: Vec<LocationRecord>) -> RaceData {
+        let mut data = race_data_with_locations(locations, vec![]);
+        data.drivers = drivers
+            .iter()
+            .map(|number| crate::domain::Driver {
+                driver_number: *number,
+                code: format!("D{number}"),
+                full_name: format!("Driver {number}"),
+                team_name: "Team".to_string(),
+                team_colour: "FF8000".to_string(),
+            })
+            .collect();
+        data
+    }
+
+    fn status_of(rows: &[DriverSnapshot], driver_number: i32) -> DriverStatus {
+        rows.iter()
+            .find(|row| row.driver.driver_number == driver_number)
+            .map(|row| row.status.clone())
+            .expect("driver row")
+    }
+
+    #[test]
+    fn a_car_parked_while_the_field_moves_is_out() {
+        let mut locations = moving_driver(1, 200.0);
+        locations.extend(moving_driver(4, 200.0));
+        locations.extend(parked_driver(16, 200.0));
+        let data = race_data_with_field(&[1, 4, 16], locations);
+        let index = ReplayDataIndex::new(&data);
+
+        let rows = index.timing_rows(200.0);
+
+        assert_eq!(status_of(&rows, 16), DriverStatus::Out);
+        assert_eq!(status_of(&rows, 1), DriverStatus::OnTrack);
+        assert_eq!(status_of(&rows, 4), DriverStatus::OnTrack);
+    }
+
+    #[test]
+    fn a_car_whose_location_feed_stopped_while_the_field_moves_is_out() {
+        let mut locations = moving_driver(1, 200.0);
+        locations.extend(moving_driver(4, 200.0));
+        // Crashed at t=40: telemetry gone since.
+        locations.extend(moving_driver(16, 40.0));
+        let data = race_data_with_field(&[1, 4, 16], locations);
+        let index = ReplayDataIndex::new(&data);
+
+        assert_eq!(status_of(&index.timing_rows(100.0), 16), DriverStatus::OnTrack, "not yet 90 s");
+        assert_eq!(status_of(&index.timing_rows(200.0), 16), DriverStatus::Out);
+    }
+
+    #[test]
+    fn a_short_stop_is_not_a_retirement() {
+        let mut locations = moving_driver(1, 200.0);
+        // Driver 4 stands still for 60 s of the 90 s window, then moves again.
+        let mut driver_4 = moving_driver(4, 140.0);
+        driver_4.extend((141..=200).map(|second| location(second as f64, 4, 7_000.0, 0.0, None)));
+        locations.extend(driver_4);
+        let data = race_data_with_field(&[1, 4], locations);
+        let index = ReplayDataIndex::new(&data);
+
+        assert_eq!(status_of(&index.timing_rows(200.0), 4), DriverStatus::OnTrack);
+    }
+
+    #[test]
+    fn a_parked_field_reports_nobody_out() {
+        // Red flag: every car sits in the pit lane. Grid before the start: same picture.
+        let mut locations = parked_driver(1, 200.0);
+        locations.extend(parked_driver(4, 200.0));
+        locations.extend(moving_driver(16, 200.0));
+        let data = race_data_with_field(&[1, 4, 16], locations);
+        let index = ReplayDataIndex::new(&data);
+
+        let rows = index.timing_rows(200.0);
+
+        assert!(rows.iter().all(|row| row.status == DriverStatus::OnTrack), "{rows:?}");
+    }
+
+    #[test]
+    fn drivers_without_a_full_window_of_history_are_not_judged() {
+        let mut locations = moving_driver(1, 200.0);
+        locations.extend(moving_driver(4, 200.0));
+        // Driver 16 only appeared 30 s ago, standing still (say, released from the garage).
+        locations.extend((170..=200).map(|second| location(second as f64, 16, 10.0, 10.0, None)));
+        let data = race_data_with_field(&[1, 4, 16], locations);
+        let index = ReplayDataIndex::new(&data);
+
+        assert_eq!(status_of(&index.timing_rows(200.0), 16), DriverStatus::OnTrack);
+    }
+
+    fn race_data_with_control(race_control: Vec<RaceControlMessage>) -> RaceData {
+        RaceData {
+            source: crate::normalization::RaceDataSource::OpenF1Historical,
+            drivers: vec![],
+            laps: vec![],
+            intervals: vec![],
+            positions: vec![],
+            locations: vec![],
+            geometry_locations: vec![],
+            pits: vec![],
+            race_control,
+            stints: vec![],
+            weather: vec![],
+            session_results: vec![],
+        }
+    }
+
+    fn race_data_with_locations(
+        locations: Vec<LocationRecord>,
+        session_results: Vec<SessionResult>,
+    ) -> RaceData {
+        RaceData {
+            source: crate::normalization::RaceDataSource::FastF1Historical,
+            drivers: vec![crate::domain::Driver {
+                driver_number: 4,
+                code: "NOR".to_string(),
+                full_name: "Lando Norris".to_string(),
+                team_name: "McLaren".to_string(),
+                team_colour: "FF8000".to_string(),
+            }],
+            laps: vec![],
+            intervals: vec![],
+            positions: vec![],
+            locations,
+            geometry_locations: vec![],
+            pits: vec![],
+            race_control: vec![],
+            stints: vec![],
+            weather: vec![],
+            session_results,
+        }
+    }
+
+    fn location(
+        t: f64,
+        driver_number: i32,
+        x: f64,
+        y: f64,
+        relative_distance: Option<f64>,
+    ) -> LocationRecord {
+        LocationRecord {
+            t,
+            driver_number,
+            x,
+            y,
+            z: None,
+            relative_distance,
+        }
+    }
+
+    fn test_geometry() -> TrackGeometry {
+        TrackGeometry {
+            contract_version: crate::domain::REPLAY_CONTRACT_VERSION.to_string(),
+            session_key: 1,
+            bounds: crate::domain::TrackBounds {
+                min_x: 0.0,
+                max_x: 100.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            centerline: vec![
+                crate::domain::TrackPoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: None,
+                    cumulative_distance: 0.0,
+                    relative_distance: 0.0,
+                },
+                crate::domain::TrackPoint {
+                    x: 100.0,
+                    y: 0.0,
+                    z: None,
+                    cumulative_distance: 100.0,
+                    relative_distance: 1.0,
+                },
+            ],
+            inner_edge: vec![],
+            outer_edge: vec![],
+            source: crate::domain::TrackGeometrySource::FastF1Telemetry,
+            quality: crate::domain::TrackGeometryQuality::Ready,
+            map_mode: crate::domain::MapMode::Gps,
+            circuit_length: Some(100.0),
+            generated_at: String::new(),
+        }
+    }
+
+    fn race_control(t: f64, flag: Option<&str>, message: &str) -> RaceControlMessage {
+        RaceControlMessage {
+            t,
+            category: "race_control".to_string(),
+            message: message.to_string(),
+            flag: flag.map(str::to_string),
+            scope: None,
+        }
+    }
+}
