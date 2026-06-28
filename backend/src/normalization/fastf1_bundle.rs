@@ -128,6 +128,7 @@ fn telemetry_locations(payload: Value) -> anyhow::Result<Vec<LocationRecord>> {
                 x: row.x,
                 y: row.y,
                 z: row.z,
+                relative_distance: row.relative_distance,
             })
         })
         .collect())
@@ -149,6 +150,7 @@ fn geometry_locations(payload: Value) -> anyhow::Result<Vec<LocationRecord>> {
                 x: point[0],
                 y: point[1],
                 z: None,
+                relative_distance: None,
             })
         })
         .collect())
@@ -278,6 +280,7 @@ struct FastF1Telemetry {
     x: f64,
     y: f64,
     z: Option<f64>,
+    relative_distance: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]

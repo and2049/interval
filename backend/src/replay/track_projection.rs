@@ -36,6 +36,11 @@ pub fn interpolate_driver_location(
                     (Some(z), None) | (None, Some(z)) => Some(z),
                     (None, None) => None,
                 },
+                relative_distance: match (a.relative_distance, b.relative_distance) {
+                    (Some(from), Some(to)) => Some(interpolate_relative_distance(from, to, ratio)),
+                    (Some(value), None) | (None, Some(value)) => Some(value),
+                    (None, None) => None,
+                },
             })
         }
         (Some(sample), _) | (_, Some(sample)) => Some(sample.clone()),
@@ -48,13 +53,20 @@ pub fn position_from_location(
     location: LocationRecord,
     interpolated: bool,
 ) -> TrackPositionSample {
-    let relative_distance =
-        super::track_geometry_math::project_relative_distance(geometry, location.x, location.y);
+    let relative_distance = location.relative_distance.or_else(|| {
+        super::track_geometry_math::project_relative_distance(geometry, location.x, location.y)
+    });
+    let display_point = relative_distance.and_then(|distance| {
+        super::track_geometry_math::point_at_relative_distance(geometry, distance)
+    });
     TrackPositionSample {
         driver_number: location.driver_number,
-        x: location.x,
-        y: location.y,
-        z: location.z,
+        x: display_point.as_ref().map_or(location.x, |point| point.x),
+        y: display_point.as_ref().map_or(location.y, |point| point.y),
+        z: display_point
+            .as_ref()
+            .and_then(|point| point.z)
+            .or(location.z),
         relative_distance,
         source: if interpolated {
             TrackPositionSource::Interpolated
@@ -68,6 +80,17 @@ pub fn position_from_location(
         },
         stale_seconds: None,
     }
+}
+
+pub fn stale_position(
+    geometry: &TrackGeometry,
+    location: LocationRecord,
+    stale_seconds: f64,
+) -> TrackPositionSample {
+    let mut position = position_from_location(geometry, location, false);
+    position.quality = TrackPositionQuality::Stale;
+    position.stale_seconds = Some(stale_seconds.max(0.0));
+    position
 }
 
 pub fn projected_position(
@@ -105,6 +128,15 @@ pub fn schematic_position(driver_number: i32, field_position: i32, t: f64) -> Tr
     }
 }
 
+fn interpolate_relative_distance(from: f64, to: f64, ratio: f64) -> f64 {
+    let normalized_from = from.rem_euclid(1.0);
+    let mut normalized_to = to.rem_euclid(1.0);
+    if normalized_to < normalized_from && normalized_from - normalized_to > 0.5 {
+        normalized_to += 1.0;
+    }
+    (normalized_from + (normalized_to - normalized_from) * ratio).rem_euclid(1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +150,7 @@ mod tests {
                 x: 0.0,
                 y: 0.0,
                 z: None,
+                relative_distance: Some(0.0),
             },
             LocationRecord {
                 t: 10.0,
@@ -125,6 +158,7 @@ mod tests {
                 x: 20.0,
                 y: 10.0,
                 z: None,
+                relative_distance: Some(0.5),
             },
         ];
 
@@ -142,6 +176,7 @@ mod tests {
                 x: idx as f64 * 10.0,
                 y: 0.0,
                 z: None,
+                relative_distance: None,
             })
             .collect::<Vec<_>>();
         let geometry = super::super::track_geometry_builder::build_track_geometry(

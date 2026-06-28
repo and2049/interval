@@ -12,6 +12,7 @@ use crate::{
 use std::collections::HashMap;
 
 const PIT_WINDOW_SECONDS: f64 = 45.0;
+const LOCATION_INTERPOLATION_MAX_GAP_SECONDS: f64 = 2.0;
 const SNAPSHOT_RACE_CONTROL_LIMIT: usize = 12;
 
 pub(crate) struct ReplayDataIndex<'a> {
@@ -120,6 +121,7 @@ impl<'a> ReplayDataIndex<'a> {
                 let lap_number = lap_record.map_or(0, |lap| lap.lap.lap_number);
                 let stint = stint_for(&self.data.stints, driver.driver_number, lap_number);
                 let in_pit = self.in_pit_window(driver.driver_number, t);
+                let latest_location = self.latest_location_sample(driver.driver_number, t);
 
                 DriverSnapshot {
                     driver: driver.clone(),
@@ -138,7 +140,7 @@ impl<'a> ReplayDataIndex<'a> {
                     }),
                     sectors: sectors_for(lap_record),
                     in_pit,
-                    status: driver_status(in_pit, result),
+                    status: driver_status(in_pit, result, latest_location, t),
                 }
             })
             .collect::<Vec<_>>();
@@ -173,14 +175,27 @@ impl<'a> ReplayDataIndex<'a> {
                     .latest_rank_record(driver.driver_number, t)
                     .map_or(driver.driver_number, |record| record.position);
 
-                if let Some((location, interpolated)) =
+                if let Some(track_location) =
                     self.interpolate_driver_location(driver.driver_number, t)
                 {
-                    return super::track_projection::position_from_location(
-                        geometry,
-                        location,
-                        interpolated,
-                    );
+                    return match track_location {
+                        TrackLocation::Fresh {
+                            location,
+                            interpolated,
+                        } => super::track_projection::position_from_location(
+                            geometry,
+                            location,
+                            interpolated,
+                        ),
+                        TrackLocation::Stale {
+                            location,
+                            stale_seconds,
+                        } => super::track_projection::stale_position(
+                            geometry,
+                            location,
+                            stale_seconds,
+                        ),
+                    };
                 }
 
                 if geometry.quality == crate::domain::TrackGeometryQuality::Ready {
@@ -267,11 +282,7 @@ impl<'a> ReplayDataIndex<'a> {
             .any(|pit| t <= pit.t + pit.pit_duration.unwrap_or(PIT_WINDOW_SECONDS).max(10.0))
     }
 
-    fn interpolate_driver_location(
-        &self,
-        driver_number: i32,
-        t: f64,
-    ) -> Option<(LocationRecord, bool)> {
+    fn interpolate_driver_location(&self, driver_number: i32, t: f64) -> Option<TrackLocation> {
         let rows = self.locations.get(&driver_number)?;
         if rows.is_empty() {
             return None;
@@ -285,10 +296,13 @@ impl<'a> ReplayDataIndex<'a> {
         let after = rows.get(insertion).copied();
 
         match (before, after) {
-            (Some(a), Some(b)) if (b.t - a.t).abs() > f64::EPSILON => {
+            (Some(a), Some(b))
+                if (b.t - a.t).abs() > f64::EPSILON
+                    && b.t - a.t <= LOCATION_INTERPOLATION_MAX_GAP_SECONDS =>
+            {
                 let ratio = ((t - a.t) / (b.t - a.t)).clamp(0.0, 1.0);
-                Some((
-                    LocationRecord {
+                Some(TrackLocation::Fresh {
+                    location: LocationRecord {
                         t,
                         driver_number,
                         x: a.x + (b.x - a.x) * ratio,
@@ -298,13 +312,41 @@ impl<'a> ReplayDataIndex<'a> {
                             (Some(z), None) | (None, Some(z)) => Some(z),
                             (None, None) => None,
                         },
+                        relative_distance: match (a.relative_distance, b.relative_distance) {
+                            (Some(from), Some(to)) => {
+                                Some(interpolate_relative_distance(from, to, ratio))
+                            }
+                            (Some(value), None) | (None, Some(value)) => Some(value),
+                            (None, None) => None,
+                        },
                     },
-                    true,
-                ))
+                    interpolated: true,
+                })
             }
-            (Some(sample), _) | (_, Some(sample)) => Some((sample.clone(), false)),
+            (Some(sample), Some(_)) if t - sample.t > LOCATION_INTERPOLATION_MAX_GAP_SECONDS => {
+                Some(TrackLocation::Stale {
+                    location: sample.clone(),
+                    stale_seconds: t - sample.t,
+                })
+            }
+            (Some(sample), _) if t - sample.t > LOCATION_INTERPOLATION_MAX_GAP_SECONDS => {
+                Some(TrackLocation::Stale {
+                    location: sample.clone(),
+                    stale_seconds: t - sample.t,
+                })
+            }
+            (Some(sample), _) | (_, Some(sample)) => Some(TrackLocation::Fresh {
+                location: sample.clone(),
+                interpolated: false,
+            }),
             (None, None) => None,
         }
+    }
+
+    fn latest_location_sample(&self, driver_number: i32, t: f64) -> Option<&'a LocationRecord> {
+        latest_by_time(self.locations.get(&driver_number)?, t, |location| {
+            location.t
+        })
     }
 
     fn recent_pace_from_laps(&self, row: &DriverSnapshot, t: f64) -> Option<DerivedMetric> {
@@ -392,14 +434,44 @@ fn sectors_for(lap: Option<&LapRecord>) -> Vec<Sector> {
     .collect()
 }
 
-fn driver_status(in_pit: bool, result: Option<&SessionResult>) -> DriverStatus {
+fn driver_status(
+    in_pit: bool,
+    result: Option<&SessionResult>,
+    latest_location: Option<&LocationRecord>,
+    t: f64,
+) -> DriverStatus {
     if in_pit {
         DriverStatus::Pit
-    } else if result.is_some_and(|result| result.dnf || result.dns || result.dsq) {
+    } else if result.is_some_and(|result| result.dns || result.dsq) {
+        DriverStatus::Out
+    } else if result.is_some_and(|result| result.dnf)
+        && latest_location
+            .is_none_or(|location| t - location.t > LOCATION_INTERPOLATION_MAX_GAP_SECONDS)
+    {
         DriverStatus::Out
     } else {
         DriverStatus::OnTrack
     }
+}
+
+enum TrackLocation {
+    Fresh {
+        location: LocationRecord,
+        interpolated: bool,
+    },
+    Stale {
+        location: LocationRecord,
+        stale_seconds: f64,
+    },
+}
+
+fn interpolate_relative_distance(from: f64, to: f64, ratio: f64) -> f64 {
+    let normalized_from = from.rem_euclid(1.0);
+    let mut normalized_to = to.rem_euclid(1.0);
+    if normalized_to < normalized_from && normalized_from - normalized_to > 0.5 {
+        normalized_to += 1.0;
+    }
+    (normalized_from + (normalized_to - normalized_from) * ratio).rem_euclid(1.0)
 }
 
 fn projected_relative_distance(lap: Option<&LapRecord>, rank: i32, t: f64) -> f64 {
@@ -473,6 +545,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn track_positions_use_relative_distance_on_centerline() {
+        let data = race_data_with_locations(
+            vec![
+                location(1.0, 4, 999.0, 999.0, Some(0.20)),
+                location(1.5, 4, 999.0, 999.0, Some(0.30)),
+            ],
+            vec![],
+        );
+        let index = ReplayDataIndex::new(&data);
+
+        let positions = index.track_positions(&test_geometry(), 1.25);
+
+        assert_eq!(
+            positions[0].quality,
+            crate::domain::TrackPositionQuality::Interpolated
+        );
+        assert_eq!(
+            positions[0].source,
+            crate::domain::TrackPositionSource::Interpolated
+        );
+        assert!(positions[0].x > 20.0 && positions[0].x < 30.0);
+        assert_eq!(positions[0].y, 0.0);
+        assert!(positions[0].relative_distance.unwrap() > 0.20);
+    }
+
+    #[test]
+    fn stale_dnf_driver_freezes_after_final_location() {
+        let data = race_data_with_locations(
+            vec![location(1.0, 4, 10.0, 0.0, Some(0.10))],
+            vec![SessionResult {
+                driver_number: 4,
+                position: Some(20),
+                dnf: true,
+                dns: false,
+                dsq: false,
+            }],
+        );
+        let index = ReplayDataIndex::new(&data);
+
+        let fresh_rows = index.timing_rows(2.0);
+        let stale_rows = index.timing_rows(4.0);
+        let positions = index.track_positions(&test_geometry(), 4.0);
+
+        assert_eq!(fresh_rows[0].status, DriverStatus::OnTrack);
+        assert_eq!(stale_rows[0].status, DriverStatus::Out);
+        assert_eq!(
+            positions[0].quality,
+            crate::domain::TrackPositionQuality::Stale
+        );
+        assert_eq!(positions[0].stale_seconds, Some(3.0));
+    }
+
     fn race_data_with_control(race_control: Vec<RaceControlMessage>) -> RaceData {
         RaceData {
             source: crate::normalization::RaceDataSource::OpenF1Historical,
@@ -487,6 +612,85 @@ mod tests {
             stints: vec![],
             weather: vec![],
             session_results: vec![],
+        }
+    }
+
+    fn race_data_with_locations(
+        locations: Vec<LocationRecord>,
+        session_results: Vec<SessionResult>,
+    ) -> RaceData {
+        RaceData {
+            source: crate::normalization::RaceDataSource::FastF1Historical,
+            drivers: vec![crate::domain::Driver {
+                driver_number: 4,
+                code: "NOR".to_string(),
+                full_name: "Lando Norris".to_string(),
+                team_name: "McLaren".to_string(),
+                team_colour: "FF8000".to_string(),
+            }],
+            laps: vec![],
+            intervals: vec![],
+            positions: vec![],
+            locations,
+            geometry_locations: vec![],
+            pits: vec![],
+            race_control: vec![],
+            stints: vec![],
+            weather: vec![],
+            session_results,
+        }
+    }
+
+    fn location(
+        t: f64,
+        driver_number: i32,
+        x: f64,
+        y: f64,
+        relative_distance: Option<f64>,
+    ) -> LocationRecord {
+        LocationRecord {
+            t,
+            driver_number,
+            x,
+            y,
+            z: None,
+            relative_distance,
+        }
+    }
+
+    fn test_geometry() -> TrackGeometry {
+        TrackGeometry {
+            contract_version: crate::domain::REPLAY_CONTRACT_VERSION.to_string(),
+            session_key: 1,
+            bounds: crate::domain::TrackBounds {
+                min_x: 0.0,
+                max_x: 100.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            centerline: vec![
+                crate::domain::TrackPoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: None,
+                    cumulative_distance: 0.0,
+                    relative_distance: 0.0,
+                },
+                crate::domain::TrackPoint {
+                    x: 100.0,
+                    y: 0.0,
+                    z: None,
+                    cumulative_distance: 100.0,
+                    relative_distance: 1.0,
+                },
+            ],
+            inner_edge: vec![],
+            outer_edge: vec![],
+            source: crate::domain::TrackGeometrySource::FastF1Telemetry,
+            quality: crate::domain::TrackGeometryQuality::Ready,
+            map_mode: crate::domain::MapMode::Gps,
+            circuit_length: Some(100.0),
+            generated_at: String::new(),
         }
     }
 

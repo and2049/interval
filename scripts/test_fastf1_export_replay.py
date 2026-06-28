@@ -1,6 +1,9 @@
 import unittest
 from pathlib import Path
 import sys
+from unittest.mock import patch
+
+import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fastf1_export_replay as export
@@ -65,6 +68,81 @@ class FastF1IntervalExportTests(unittest.TestCase):
         self.assertEqual(position_times, {10.0, 10.5})
 
 
+class FastF1ResultStatusTests(unittest.TestCase):
+    def test_classification_status_maps_finished_and_lapped_to_not_dnf(self):
+        self.assertFalse(export.is_dnf_status("Finished"))
+        self.assertFalse(export.is_dnf_status("+1 Lap"))
+        self.assertFalse(export.is_dnf_status("12"))
+
+    def test_classification_status_maps_retirements_to_dnf(self):
+        self.assertTrue(export.is_dnf_status("Accident"))
+        self.assertTrue(export.is_dnf_status("Engine"))
+        self.assertTrue(export.is_dnf_status("Retired"))
+
+    def test_dns_and_dsq_are_distinct_from_dnf(self):
+        self.assertTrue(export.is_dns_status("Did not start"))
+        self.assertTrue(export.is_dsq_status("Disqualified"))
+        self.assertFalse(export.is_dnf_status("Did not start"))
+        self.assertFalse(export.is_dnf_status("Disqualified"))
+
+
+class FastF1ScheduleResolverTests(unittest.TestCase):
+    def test_resolves_saudi_arabian_metadata_against_saudi_arabia_schedule(self):
+        schedule = pd.DataFrame(
+            [
+                {
+                    "RoundNumber": 2,
+                    "EventName": "Saudi Arabian Grand Prix",
+                    "OfficialEventName": "FORMULA 1 STC SAUDI ARABIAN GRAND PRIX 2024",
+                    "Country": "Saudi Arabia",
+                    "Location": "Jeddah",
+                    "EventDate": pd.Timestamp("2024-03-09T17:00:00Z"),
+                }
+            ]
+        )
+
+        with patch.object(export, "fastf1", FakeFastF1(schedule)):
+            round_number, metadata = export.resolve_round(
+                2024,
+                None,
+                "Saudi Arabian Grand Prix",
+                "Saudi Arabia",
+                "Jeddah",
+                "2024-03-09T17:00:00Z",
+            )
+
+        self.assertEqual(round_number, 2)
+        self.assertEqual(metadata["match_method"], "fastf1_schedule_match")
+
+    def test_uses_session_date_when_text_metadata_is_not_confident(self):
+        schedule = pd.DataFrame(
+            [
+                {
+                    "RoundNumber": 5,
+                    "EventName": "Known Event",
+                    "OfficialEventName": "Known Event",
+                    "Country": "Known",
+                    "Location": "Known",
+                    "EventDate": pd.Timestamp("2024-05-05T12:00:00Z"),
+                }
+            ]
+        )
+
+        with patch.object(export, "fastf1", FakeFastF1(schedule)):
+            round_number, metadata = export.resolve_round(
+                2024,
+                None,
+                "Completely Unrelated",
+                "Elsewhere",
+                "Nowhere",
+                "2024-05-05T14:00:00Z",
+            )
+
+        self.assertEqual(round_number, 5)
+        self.assertEqual(metadata["match_method"], "fastf1_schedule_date_match")
+        self.assertTrue(metadata["warnings"])
+
+
 def sample(driver_number, t, lap_number, relative_distance, lap_duration=90.0):
     return {
         "driver_number": driver_number,
@@ -73,6 +151,14 @@ def sample(driver_number, t, lap_number, relative_distance, lap_duration=90.0):
         "lap_duration": lap_duration,
         "relative_distance": relative_distance,
     }
+
+
+class FakeFastF1:
+    def __init__(self, schedule):
+        self.schedule = schedule
+
+    def get_event_schedule(self, year):
+        return self.schedule
 
 
 if __name__ == "__main__":

@@ -181,6 +181,7 @@ mod tests {
                 x: 10.0,
                 y: 20.0,
                 z: None,
+                relative_distance: None,
             }],
             geometry_locations: vec![],
             pits: vec![],

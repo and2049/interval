@@ -72,6 +72,7 @@ impl Default for TrackPositionSource {
 pub enum TrackPositionQuality {
     Real,
     Interpolated,
+    Stale,
     Projected,
     Schematic,
     Missing,

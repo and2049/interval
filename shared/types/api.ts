@@ -16,7 +16,8 @@ export type EventKind =
   | "stint_change"
   | "leader_change"
   | "weather_change"
-  | "data_gap";
+  | "data_gap"
+  | "driver_out";
 export type EventSeverity = "info" | "notice" | "warning" | "critical";
 export type EventSource = "open_f1" | "fast_f1" | "derived" | "system";
 export type IngestStatus = "not_ingested" | "fetching" | "normalizing" | "ready" | "failed";
@@ -24,6 +25,7 @@ export type TrackPositionSource = "real" | "interpolated" | "projected" | "schem
 export type TrackPositionQuality =
   | "real"
   | "interpolated"
+  | "stale"
   | "projected"
   | "schematic"
   | "missing";

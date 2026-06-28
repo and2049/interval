@@ -110,6 +110,7 @@ mod tests {
                 x: idx as f64 * 10.0,
                 y: (idx % 3) as f64,
                 z: None,
+                relative_distance: None,
             })
             .collect::<Vec<_>>();
 
@@ -146,6 +147,7 @@ mod tests {
                 x: idx as f64 * 10.0,
                 y: (idx % 3) as f64,
                 z: None,
+                relative_distance: None,
             })
             .collect::<Vec<_>>();
 
@@ -167,6 +169,7 @@ mod tests {
                 x: idx as f64 * 10.0,
                 y: (idx % 3) as f64,
                 z: None,
+                relative_distance: None,
             })
             .collect::<Vec<_>>();
 

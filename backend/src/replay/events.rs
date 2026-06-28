@@ -55,6 +55,8 @@ pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
     events.extend(super::derived_events::stint_change_events(data));
     events.extend(super::derived_events::leader_change_events(&data.positions));
     events.extend(super::derived_events::weather_change_events(&data.weather));
+    events.extend(super::derived_events::data_gap_events(&data.locations));
+    events.extend(super::derived_events::driver_out_events(data));
     events.sort_by(|a, b| a.t.total_cmp(&b.t).then_with(|| a.id.cmp(&b.id)));
     events
 }
@@ -75,7 +77,7 @@ mod tests {
             EventKind, EventSeverity, Stint, TrackPositionQuality, TrackPositionSample,
             TrackPositionSource, TyreCompound, WeatherSample,
         },
-        normalization::{LapRecord, PitEvent, PositionRecord, SessionResult},
+        normalization::{LapRecord, LocationRecord, PitEvent, PositionRecord, SessionResult},
     };
 
     #[test]
@@ -141,6 +143,46 @@ mod tests {
                 && event.severity == EventSeverity::Warning));
     }
 
+    #[test]
+    fn includes_data_gap_and_driver_out_events() {
+        let data = RaceData {
+            source: crate::normalization::RaceDataSource::FastF1Historical,
+            drivers: vec![],
+            laps: vec![],
+            intervals: vec![],
+            positions: vec![],
+            locations: vec![
+                location_record(0.0, 4),
+                location_record(15.0, 4),
+                location_record(20.0, 81),
+            ],
+            geometry_locations: vec![],
+            pits: Vec::<PitEvent>::new(),
+            race_control: vec![],
+            stints: vec![],
+            weather: vec![],
+            session_results: vec![SessionResult {
+                driver_number: 81,
+                position: Some(18),
+                dnf: true,
+                dns: false,
+                dsq: false,
+            }],
+        };
+
+        let events = generate_events(&data);
+
+        assert!(events.iter().any(|event| {
+            event.kind == EventKind::DataGap && event.driver_number == Some(4) && event.t == 10.0
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == EventKind::DriverOut
+                && event.driver_number == Some(81)
+                && event.source == EventSource::FastF1
+                && event.t == 22.0
+        }));
+    }
+
     fn lap_record(driver_number: i32, lap_number: i32, t_start: f64) -> LapRecord {
         LapRecord {
             t_start,
@@ -183,6 +225,17 @@ mod tests {
             rainfall: Some(rainfall),
             wind_direction: None,
             wind_speed: None,
+        }
+    }
+
+    fn location_record(t: f64, driver_number: i32) -> LocationRecord {
+        LocationRecord {
+            t,
+            driver_number,
+            x: t,
+            y: 0.0,
+            z: None,
+            relative_distance: Some((t / 100.0).rem_euclid(1.0)),
         }
     }
 }

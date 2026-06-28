@@ -31,6 +31,7 @@ pub enum EventKind {
     LeaderChange,
     WeatherChange,
     DataGap,
+    DriverOut,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

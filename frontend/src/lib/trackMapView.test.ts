@@ -87,6 +87,10 @@ describe("driverDots", () => {
       color: "#3671C6",
       driver_number: 1,
       isLeader: true,
+      isOut: false,
+      isStale: false,
+      opacity: 1,
+      radius: 2.05,
       showCode: true,
       source: "projected",
       quality: "projected",
@@ -122,12 +126,34 @@ describe("driverDots", () => {
 
   test("includes stale source metadata in the accessible dot label", () => {
     const dots = driverDots(
-      [{ ...position(4, 100, 50), source: "interpolated", quality: "interpolated", stale_seconds: 12 }],
+      [{ ...position(4, 100, 50), source: "interpolated", quality: "stale", stale_seconds: 12 }],
       [row(4, "NOR", "FF8000")],
       geometry()
     );
 
-    expect(dots[0].label).toBe("NOR: interpolated/interpolated, 12s stale");
+    expect(dots[0]).toMatchObject({
+      isStale: true,
+      isOut: false,
+      opacity: 0.52,
+      radius: 1.05,
+      label: "NOR: interpolated/stale, 12s stale"
+    });
+  });
+
+  test("marks out drivers as faded frozen dots", () => {
+    const dots = driverDots(
+      [{ ...position(4, 100, 50), quality: "stale", stale_seconds: 18 }],
+      [{ ...row(4, "NOR", "FF8000"), status: "out" }],
+      geometry()
+    );
+
+    expect(dots[0]).toMatchObject({
+      isOut: true,
+      isStale: true,
+      opacity: 0.38,
+      radius: 1.05,
+      label: "NOR: projected/stale, 18s stale, out"
+    });
   });
 });
 

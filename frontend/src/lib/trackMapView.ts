@@ -26,6 +26,10 @@ export interface TrackDriverDot {
   quality: TrackPositionSample["quality"];
   label: string;
   isLeader: boolean;
+  isOut: boolean;
+  isStale: boolean;
+  opacity: number;
+  radius: number;
   showCode: boolean;
 }
 
@@ -90,10 +94,13 @@ export function driverDots(
 ): TrackDriverDot[] {
   const drivers = new Map(timingRows.map((row) => [row.driver.driver_number, row.driver]));
   const ranks = new Map(timingRows.map((row) => [row.driver.driver_number, row.position]));
+  const statuses = new Map(timingRows.map((row) => [row.driver.driver_number, row.status]));
   const leaderNumber = timingRows[0]?.driver.driver_number;
   return positions.map((position) => {
     const driver = drivers.get(position.driver_number);
     const rank = ranks.get(position.driver_number);
+    const isOut = statuses.get(position.driver_number) === "out";
+    const isStale = position.quality === "stale" || position.stale_seconds != null;
     return {
       code: driver?.code ?? String(position.driver_number),
       color: driver ? `#${driver.team_colour}` : "#2cf5bf",
@@ -101,8 +108,12 @@ export function driverDots(
       point: displayTrackPoint(position, geometry),
       source: position.source,
       quality: position.quality,
-      label: driverDotLabel(driver?.code ?? String(position.driver_number), position),
+      label: driverDotLabel(driver?.code ?? String(position.driver_number), position, isOut),
       isLeader: position.driver_number === leaderNumber,
+      isOut,
+      isStale,
+      opacity: isOut ? 0.38 : isStale ? 0.52 : 1,
+      radius: isOut || isStale ? 1.05 : position.driver_number === leaderNumber ? 2.05 : 1.55,
       showCode: rank != null && rank <= 3
     };
   });
@@ -217,7 +228,8 @@ function wrapUnit(value: number) {
   return ((value % 1) + 1) % 1;
 }
 
-function driverDotLabel(code: string, position: TrackPositionSample): string {
+function driverDotLabel(code: string, position: TrackPositionSample, isOut = false): string {
   const stale = position.stale_seconds == null ? "" : `, ${position.stale_seconds.toFixed(0)}s stale`;
-  return `${code}: ${position.source}/${position.quality}${stale}`;
+  const status = isOut ? ", out" : "";
+  return `${code}: ${position.source}/${position.quality}${stale}${status}`;
 }

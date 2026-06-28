@@ -9,6 +9,7 @@ pub struct LocationRecord {
     pub x: f64,
     pub y: f64,
     pub z: Option<f64>,
+    pub relative_distance: Option<f64>,
 }
 
 pub fn location_samples(
@@ -30,6 +31,7 @@ pub fn location_samples(
                 x,
                 y,
                 z: row.z,
+                relative_distance: None,
             })
         })
         .collect())

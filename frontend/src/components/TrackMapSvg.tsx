@@ -40,15 +40,36 @@ export function TrackMapSvg(props: {
           return (
             <g>
               <title>{dot().label}</title>
-              <ShowLeaderHalo show={dot().isLeader} x={point().x} y={point().y} />
+              <ShowLeaderHalo show={dot().isLeader && !dot().isOut} x={point().x} y={point().y} />
               <circle
                 cx={point().x}
                 cy={point().y}
-                r={dot().isLeader ? "2.05" : "1.55"}
+                r={dot().radius}
                 fill={dot().color}
                 stroke="#f7fbff"
                 stroke-width="0.35"
+                opacity={dot().opacity}
               />
+              <Show when={dot().isOut}>
+                <line
+                  x1={point().x - 1.1}
+                  y1={point().y - 1.1}
+                  x2={point().x + 1.1}
+                  y2={point().y + 1.1}
+                  stroke="#f7fbff"
+                  stroke-width="0.25"
+                  opacity="0.55"
+                />
+                <line
+                  x1={point().x + 1.1}
+                  y1={point().y - 1.1}
+                  x2={point().x - 1.1}
+                  y2={point().y + 1.1}
+                  stroke="#f7fbff"
+                  stroke-width="0.25"
+                  opacity="0.55"
+                />
+              </Show>
               <Show when={dot().showCode}>
                 <text
                   x={point().x + 2.25}
@@ -56,6 +77,7 @@ export function TrackMapSvg(props: {
                   fill="#e7ecf0"
                   font-size="2.35"
                   font-family="monospace"
+                  opacity={dot().opacity}
                 >
                   {dot().code}
                 </text>
