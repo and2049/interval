@@ -47,6 +47,18 @@ describe("specific selection helpers", () => {
     expect(nextSessionSelection([readiness(9472), readiness(9839)], undefined)).toBe(9472);
   });
 
+  test("skips unavailable sessions for automatic session selection", () => {
+    expect(
+      nextSessionSelection(
+        [readiness(100, { support_status: "cancelled" }), readiness(101)],
+        undefined
+      )
+    ).toBe(101);
+    expect(
+      nextSessionSelection([readiness(100, { support_status: "future" })], undefined)
+    ).toBeUndefined();
+  });
+
   test("prefer the curated MVP keys when no current selection is active", () => {
     expect(nextSeasonSelection([{ year: 2026 }, { year: 2024 }], undefined, 2024)).toBe(2024);
     expect(nextMeetingSelection([meeting(1), meeting(1229)], undefined, 1229)).toBe(1229);
@@ -144,13 +156,28 @@ describe("select option builders", () => {
 
   test("include readiness state in session option labels", () => {
     expect(sessionOptions([readiness(9472, { replay_ready: true })])).toEqual([
-      { value: 9472, label: "RACE · ready" }
+      { value: 9472, label: "RACE · ready", disabled: false, title: undefined }
     ]);
     expect(sessionOptions([readiness(9839, { is_demo: true })])).toEqual([
-      { value: 9839, label: "RACE · demo" }
+      { value: 9839, label: "RACE · demo", disabled: false, title: undefined }
     ]);
     expect(sessionOptions([readiness(9473, { session_type: "sprint", name: "Sprint" })])).toEqual([
-      { value: 9473, label: "SPRINT · not ingested" }
+      { value: 9473, label: "SPRINT · not ingested", disabled: false, title: undefined }
+    ]);
+    expect(
+      sessionOptions([
+        readiness(9474, {
+          support_status: "cancelled",
+          support_reason: "Event was cancelled"
+        })
+      ])
+    ).toEqual([
+      {
+        value: 9474,
+        label: "RACE · cancelled",
+        disabled: true,
+        title: "Event was cancelled"
+      }
     ]);
   });
 
@@ -177,6 +204,8 @@ function readiness(
     Pick<SessionReadiness, "ingest_status" | "replay_ready" | "is_demo"> & {
       session_type: SessionReadiness["session"]["session_type"];
       name: string;
+      support_status: SessionReadiness["support_status"];
+      support_reason: string;
     }
   > = {}
 ): SessionReadiness {
@@ -194,6 +223,8 @@ function readiness(
     ingest_status: overrides.ingest_status ?? "not_ingested",
     replay_ready: overrides.replay_ready ?? false,
     is_demo: overrides.is_demo ?? false,
-    last_error: null
+    last_error: null,
+    support_status: overrides.support_status ?? "supported",
+    support_reason: overrides.support_reason ?? null
   };
 }

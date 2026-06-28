@@ -113,12 +113,14 @@ pub async fn list_session_readiness(
         r#"
         SELECT
             s.session_key, s.meeting_key, s.year, s.name, s.session_type, s.start_time, s.end_time, s.total_laps,
+            m.name AS meeting_name, m.country, m.location,
             COALESCE(i.status, 'not_ingested') AS ingest_status,
             i.last_error,
-            CASE WHEN m.session_key IS NULL THEN 0 ELSE 1 END AS replay_ready
+            CASE WHEN r.session_key IS NULL THEN 0 ELSE 1 END AS replay_ready
         FROM sessions s
         LEFT JOIN ingest_status i ON i.session_key = s.session_key
-        LEFT JOIN replay_metadata m ON m.session_key = s.session_key
+        LEFT JOIN replay_metadata r ON r.session_key = s.session_key
+        LEFT JOIN meetings m ON m.meeting_key = s.meeting_key
         WHERE s.meeting_key = ? AND s.session_type IN ('race', 'sprint')
         ORDER BY s.start_time
         "#,
@@ -166,6 +168,14 @@ fn session_readiness_from_row(row: sqlx::sqlite::SqliteRow) -> SessionReadiness 
         row.get::<String, _>("ingest_status").as_str(),
     );
     let replay_ready = row.get::<i64, _>("replay_ready") == 1;
+    let meeting = Meeting {
+        meeting_key: session.meeting_key,
+        year: session.year,
+        name: row.try_get("meeting_name").unwrap_or_default(),
+        country: row.try_get("country").unwrap_or_default(),
+        location: row.try_get("location").unwrap_or_default(),
+    };
+    let support = crate::domain::session_support(&session, Some(&meeting), chrono::Utc::now());
     SessionReadiness {
         is_demo: session.session_key == crate::storage::DEMO_SESSION_KEY,
         ingest_status: if replay_ready && status == IngestStatus::NotIngested {
@@ -175,6 +185,8 @@ fn session_readiness_from_row(row: sqlx::sqlite::SqliteRow) -> SessionReadiness 
         },
         replay_ready,
         last_error: row.get("last_error"),
+        support_status: support.status,
+        support_reason: support.reason,
         session,
     }
 }

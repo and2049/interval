@@ -1,6 +1,6 @@
 use super::{ApiError, AppState};
 use crate::{
-    domain::{IngestResponse, IngestStatus},
+    domain::{IngestResponse, IngestStatus, SessionSupportStatus},
     replay, storage,
 };
 use axum::{
@@ -19,6 +19,25 @@ pub async fn ingest_session(
         .await?
         .ok_or(ApiError::NotFound)?;
     let meeting = storage::get_meeting(&state.pool, session.meeting_key).await?;
+    let support = crate::domain::session_support(&session, meeting.as_ref(), chrono::Utc::now());
+    if support.status != SessionSupportStatus::Supported {
+        let message = support.reason.unwrap_or_else(|| {
+            "This session is not available for historical replay ingest.".to_string()
+        });
+        storage::set_ingest_status(
+            &state.pool,
+            session_key,
+            IngestStatus::Failed,
+            Some(&message),
+        )
+        .await?;
+        return Ok(failed_ingest_response(
+            StatusCode::CONFLICT,
+            session_key,
+            0,
+            message,
+        ));
+    }
     storage::set_ingest_status(
         &state.pool,
         session_key,

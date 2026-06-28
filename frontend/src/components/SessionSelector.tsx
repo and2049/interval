@@ -4,6 +4,7 @@ import { api } from "../lib/api";
 import {
   canOpenSessionFromCache,
   canOpenSessionAfterIngest,
+  canStartSessionAction,
   ingestOutcome,
   ingestOutcomeClass,
   isBusySessionAction,
@@ -157,6 +158,12 @@ export function SessionSelector(props: SessionSelectorProps) {
     const readiness = selectedReadiness();
     props.onSessionIntent?.(key);
 
+    if (!canStartSessionAction(readiness)) {
+      setIngestState("failed");
+      setIngestError(readiness?.support_reason ?? "Selected session is unavailable.");
+      return;
+    }
+
     setIngestState("checking");
     setIngestError(undefined);
     if (canOpenSessionFromCache(readiness)) {
@@ -280,7 +287,11 @@ export function SessionSelector(props: SessionSelectorProps) {
       <button
         class="ml-2 border border-mint bg-mint/10 px-3 py-1 font-semibold text-mint disabled:border-line disabled:text-slate-500"
         data-testid="session-open"
-        disabled={selectedSession() == null || isBusySessionAction(ingestState())}
+        disabled={
+          selectedSession() == null ||
+          !canStartSessionAction(selectedReadiness()) ||
+          isBusySessionAction(ingestState())
+        }
         onClick={() => void openSelected("manual")}
       >
         {actionLabel()}

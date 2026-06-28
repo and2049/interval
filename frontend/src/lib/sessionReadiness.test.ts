@@ -24,6 +24,11 @@ describe("sessionStatusLabel", () => {
   test("humanizes non-ready ingest status", () => {
     expect(sessionStatusLabel(readiness({ ingest_status: "not_ingested" }))).toBe("not ingested");
   });
+
+  test("labels unsupported sessions before ingest status", () => {
+    expect(sessionStatusLabel(readiness({ support_status: "cancelled" }))).toBe("cancelled");
+    expect(sessionStatusLabel(readiness({ support_status: "future" }))).toBe("not available yet");
+  });
 });
 
 describe("sessionStatusClass", () => {
@@ -39,6 +44,7 @@ describe("sessionStatusBadgeText", () => {
   test("formats demo and ingest statuses for compact badges", () => {
     expect(sessionStatusBadgeText(readiness({ is_demo: true }))).toBe("DEMO");
     expect(sessionStatusBadgeText(readiness({ ingest_status: "not_ingested" }))).toBe("NOT INGESTED");
+    expect(sessionStatusBadgeText(readiness({ support_status: "cancelled" }))).toBe("CANCELLED");
   });
 });
 
@@ -87,6 +93,14 @@ describe("sessionActionLabel", () => {
         readiness: readiness({ replay_ready: false })
       })
     ).toBe("INGEST + OPEN");
+
+    expect(
+      sessionActionLabel({
+        ingestState: "idle",
+        selectedSession: 9472,
+        readiness: readiness({ support_status: "cancelled" })
+      })
+    ).toBe("UNAVAILABLE");
   });
 
   test("labels automatic selection progress and retry states", () => {
@@ -142,6 +156,9 @@ describe("canOpenSessionFromCache", () => {
     expect(canOpenSessionFromCache(readiness({ replay_ready: true }))).toBe(true);
     expect(canOpenSessionFromCache(readiness({ is_demo: true }))).toBe(true);
     expect(canOpenSessionFromCache(readiness({ replay_ready: false, is_demo: false }))).toBe(false);
+    expect(
+      canOpenSessionFromCache(readiness({ replay_ready: true, support_status: "cancelled" }))
+    ).toBe(false);
     expect(canOpenSessionFromCache(undefined)).toBe(false);
   });
 });
@@ -192,6 +209,11 @@ describe("shouldClearTransientSessionAction", () => {
 describe("session ingest feedback helpers", () => {
   test("chooses explicit errors before readiness errors and fallback text", () => {
     expect(sessionIngestErrorMessage({ ingestError: "fetch failed" })).toBe("fetch failed");
+    expect(
+      sessionIngestErrorMessage({
+        readiness: readiness({ support_status: "future", support_reason: "Not run yet" })
+      })
+    ).toBe("Not run yet");
     expect(
       sessionIngestErrorMessage({
         readiness: readiness({ last_error: "cached failure" })
@@ -282,6 +304,8 @@ function readiness(overrides: Partial<SessionReadiness>): SessionReadiness {
     replay_ready: false,
     is_demo: false,
     last_error: null,
+    support_status: "supported",
+    support_reason: null,
     ...overrides
   };
 }

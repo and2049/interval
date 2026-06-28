@@ -3,7 +3,8 @@ mod replay;
 mod track;
 
 pub use ingest::{
-    EndpointCoverage, IngestResponse, IngestStatus, IngestTrackGeometrySummary, SessionReadiness,
+    session_support, EndpointCoverage, IngestResponse, IngestStatus, IngestTrackGeometrySummary,
+    SessionReadiness, SessionSupport, SessionSupportStatus,
 };
 pub use replay::*;
 pub use track::{

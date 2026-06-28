@@ -21,6 +21,7 @@ export type EventKind =
 export type EventSeverity = "info" | "notice" | "warning" | "critical";
 export type EventSource = "open_f1" | "fast_f1" | "derived" | "system";
 export type IngestStatus = "not_ingested" | "fetching" | "normalizing" | "ready" | "failed";
+export type SessionSupportStatus = "supported" | "future" | "cancelled";
 export type TrackPositionSource = "real" | "interpolated" | "projected" | "schematic";
 export type TrackPositionQuality =
   | "real"
@@ -59,6 +60,8 @@ export interface SessionReadiness {
   replay_ready: boolean;
   is_demo: boolean;
   last_error: string | null;
+  support_status: SessionSupportStatus;
+  support_reason: string | null;
 }
 
 export interface Driver {

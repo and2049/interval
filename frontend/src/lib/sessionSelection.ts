@@ -4,6 +4,8 @@ import { sessionStatusLabel } from "./sessionReadiness";
 export interface SessionSelectOption {
   value: number;
   label: string;
+  disabled?: boolean;
+  title?: string;
 }
 
 export function nextSelection<T>(
@@ -40,7 +42,8 @@ export function nextSessionSelection(
   selected: number | undefined,
   preferred?: number
 ) {
-  return nextSelection(sessions, selected, (entry) => entry.session.session_key, preferred);
+  const selectable = sessions?.filter((entry) => entry.support_status === "supported");
+  return nextSelection(selectable, selected, (entry) => entry.session.session_key, preferred);
 }
 
 export function readinessForSession(
@@ -99,7 +102,9 @@ export function meetingOptions(meetings: Meeting[] | undefined): SessionSelectOp
 export function sessionOptions(sessions: SessionReadiness[] | undefined): SessionSelectOption[] {
   return (sessions ?? []).map((entry) => ({
     value: entry.session.session_key,
-    label: `${sessionDisplayName(entry.session)} · ${sessionStatusLabel(entry)}`
+    label: `${sessionDisplayName(entry.session)} · ${sessionStatusLabel(entry)}`,
+    disabled: entry.support_status !== "supported",
+    title: entry.support_reason ?? undefined
   }));
 }
 

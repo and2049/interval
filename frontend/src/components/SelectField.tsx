@@ -4,6 +4,8 @@ import { parseSelectNumber } from "../lib/selectField";
 export interface SelectOption {
   value: number;
   label: string;
+  disabled?: boolean;
+  title?: string;
 }
 
 interface SelectFieldProps {
@@ -42,7 +44,11 @@ export function SelectField(props: SelectFieldProps) {
       >
         {props.value === undefined && <option value="" disabled>Select {props.label}</option>}
         <For each={props.options}>
-          {(option) => <option value={option.value}>{option.label}</option>}
+          {(option) => (
+            <option value={option.value} disabled={option.disabled} title={option.title}>
+              {option.label}
+            </option>
+          )}
         </For>
       </select>
     </>

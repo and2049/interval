@@ -303,6 +303,69 @@ async fn sprint_ingest_failure_records_selected_session_error() {
 }
 
 #[tokio::test]
+async fn cancelled_session_ingest_is_blocked_before_fastf1() {
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let meeting = crate::domain::Meeting {
+        meeting_key: 2601,
+        year: 2026,
+        name: "Saudi Arabian Grand Prix".to_string(),
+        country: "Saudi Arabia".to_string(),
+        location: "Jeddah".to_string(),
+    };
+    let session = crate::domain::Session {
+        session_key: 26001,
+        meeting_key: meeting.meeting_key,
+        year: meeting.year,
+        name: "Race".to_string(),
+        session_type: crate::domain::SessionType::Race,
+        start_time: "2026-04-19T17:00:00Z".to_string(),
+        end_time: "2026-04-19T19:00:00Z".to_string(),
+        total_laps: 0,
+    };
+    storage::upsert_meetings(&pool, &[meeting]).await.unwrap();
+    storage::upsert_sessions(&pool, &[session]).await.unwrap();
+    let historical = crate::connectors::openf1_historical::HistoricalClient::with_base_url(
+        "http://127.0.0.1:1/v1/".parse().unwrap(),
+    );
+    let fastf1 = crate::connectors::fastf1_historical::FastF1HistoricalClient::for_test(
+        std::env::current_dir().unwrap(),
+        Some(std::path::PathBuf::from("missing-fastf1-python")),
+    );
+    let app = router(AppState::new_with_fastf1(pool.clone(), historical, fastf1));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/26001/ingest")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload = serde_json::from_slice::<Value>(&body).unwrap();
+    assert_eq!(payload["session_key"], 26001);
+    assert_eq!(payload["status"], "failed");
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|message| message.contains("cancelled")));
+
+    let readiness = storage::list_session_readiness(&pool, 2601)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        readiness.support_status,
+        crate::domain::SessionSupportStatus::Cancelled
+    );
+}
+
+#[tokio::test]
 async fn public_replay_routes_return_nested_v1_contracts() {
     let app = seeded_router().await;
 

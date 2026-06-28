@@ -16,6 +16,8 @@ export interface IngestOutcome {
 }
 
 export function sessionStatusLabel(entry: SessionReadiness) {
+  if (entry.support_status === "cancelled") return "cancelled";
+  if (entry.support_status === "future") return "not available yet";
   if (entry.is_demo) return "demo";
   if (entry.replay_ready) return "ready";
   return entry.ingest_status.replace("_", " ");
@@ -36,6 +38,8 @@ export function sessionStatusClass(status: IngestStatus) {
 }
 
 export function sessionStatusBadgeText(entry: SessionReadiness) {
+  if (entry.support_status === "cancelled") return "CANCELLED";
+  if (entry.support_status === "future") return "FUTURE";
   return entry.is_demo ? "DEMO" : entry.ingest_status.replace("_", " ").toUpperCase();
 }
 
@@ -45,6 +49,7 @@ export function sessionActionLabel(args: {
   activeSessionKey?: number;
   readiness?: SessionReadiness;
 }) {
+  if (args.readiness && !isSessionSupported(args.readiness)) return "UNAVAILABLE";
   if (args.ingestState === "checking") return "CHECKING";
   if (args.ingestState === "opening_cache" || args.ingestState === "opening_replay") {
     return "OPENING";
@@ -58,8 +63,16 @@ export function sessionActionLabel(args: {
   return "INGEST + OPEN";
 }
 
+export function isSessionSupported(readiness?: SessionReadiness) {
+  return !readiness || readiness.support_status === "supported";
+}
+
+export function canStartSessionAction(readiness?: SessionReadiness) {
+  return Boolean(readiness && isSessionSupported(readiness));
+}
+
 export function canOpenSessionFromCache(readiness?: SessionReadiness) {
-  return Boolean(readiness?.replay_ready || readiness?.is_demo);
+  return Boolean(isSessionSupported(readiness) && (readiness?.replay_ready || readiness?.is_demo));
 }
 
 export function canOpenSessionAfterIngest(response: IngestResponse) {
@@ -107,7 +120,12 @@ export function sessionIngestErrorMessage(args: {
   ingestError?: string;
   readiness?: SessionReadiness;
 }) {
-  return args.ingestError ?? args.readiness?.last_error ?? "Ingest failed.";
+  return (
+    args.ingestError ??
+    args.readiness?.support_reason ??
+    args.readiness?.last_error ??
+    "Ingest failed."
+  );
 }
 
 export function ingestOutcome(response?: IngestResponse): IngestOutcome | undefined {
