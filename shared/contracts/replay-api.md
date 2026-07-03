@@ -1,6 +1,6 @@
 # Replay API Contract
 
-The backend owns historical ingest, normalization, caching, replay timeline lookup, and derived metrics. FastF1 is the primary historical replay source; OpenF1 remains available for discovery, legacy cached rebuilds, and future live data. The frontend owns playback controls and renders versioned replay contracts. MVP contract version is `replay.v1`.
+The backend owns historical ingest, normalization, caching, replay timeline lookup, live polling, and derived metrics. FastF1 is the primary historical replay source; OpenF1 remains available for discovery, legacy cached rebuilds, and live race data. The frontend owns playback controls and renders versioned replay contracts. MVP contract version is `replay.v1`.
 
 ## Endpoints
 
@@ -204,6 +204,65 @@ Returns `404` when replay artifacts do not exist for the session. A valid replay
 ### `GET /api/sessions/{session_key}/replay/stream`
 
 SSE endpoint that emits the same v1 metadata, snapshot, and event shapes used by REST. Event names are `metadata`, `snapshot`, `event`, `end`, and `error`. Snapshot lookup remains the source of truth, and snapshot events use the nested v1 shape without legacy top-level `drivers` or `positions` fields.
+
+### Live Simulation
+
+Live simulation is an in-memory backend mode for testing live behavior from an already cached historical replay. It does not call OpenF1 live endpoints. FastF1 remains historical-only; OpenF1 is the real live source.
+
+- `POST /api/sessions/{session_key}/live-simulation/start`
+- `GET /api/sessions/{session_key}/live-simulation/status`
+- `GET /api/sessions/{session_key}/live-simulation/snapshot`
+- `GET /api/sessions/{session_key}/live-simulation/stream`
+- `POST /api/sessions/{session_key}/live-simulation/stop`
+
+The live stream emits the same `metadata`, `snapshot`, `event`, `end`, and `error` SSE event names as replay streaming. Snapshot payloads remain `ReplaySnapshot` with `contract_version: "replay.v1"`. Metadata emitted by the live stream labels `data_sources[0].name` as `"live_simulation"` so the frontend can show a live-simulation badge without changing panel data contracts.
+
+Live simulation starts from `ReplayMetadata.race_start_t` when that value is present and inside replay bounds, so pre-grid and formation-lap time is skipped for normal testing. If `race_start_t` is unavailable, the simulator falls back to `min_t`.
+
+### OpenF1 Live
+
+OpenF1 live mode is enabled by default. Disable it for offline/dev runs with `INTERVAL_OPENF1_LIVE_ENABLED=false`, `0`, `no`, or `off`. Optional configuration includes `INTERVAL_OPENF1_LIVE_BASE_URL`, `INTERVAL_OPENF1_LIVE_TOKEN`, and `INTERVAL_OPENF1_LIVE_AUTH_HEADER`. With the default `Authorization` header, `INTERVAL_OPENF1_LIVE_TOKEN` accepts either a raw token such as `abc123` or a prefixed value such as `Bearer abc123`.
+
+- `GET /api/live/current`
+- `POST /api/sessions/{session_key}/live/start`
+- `GET /api/sessions/{session_key}/live/status`
+- `GET /api/sessions/{session_key}/live/metadata`
+- `GET /api/sessions/{session_key}/live/snapshot`
+- `GET /api/sessions/{session_key}/live/events`
+- `GET /api/sessions/{session_key}/live/stream`
+- `GET /api/sessions/{session_key}/live/track/geometry`
+- `POST /api/sessions/{session_key}/live/stop`
+
+The backend detects an active race or sprint from OpenF1 session metadata once the session start time has been reached, with post-session padding kept open for reconnects. Pre-session races are reported as `next_session`, not `active`, so the frontend waits instead of opening live before timing/location rows exist. Starting live mode fetches the latest OpenF1 rows, normalizes them into the same internal race model, and exposes `ReplayMetadata` plus `ReplaySnapshot` with `data_sources[0].name = "openf1_live"`. The frontend checks `/api/live/current` on startup, polls inactive/error availability with a backed-off cadence, keeps OpenF1 row-warmup checks responsive, and auto-connects when a live session is available.
+
+`/api/live/current` returns a typed `availability` value: `disabled`, `inactive`, `active`, or `error`. If the backend already has a running in-memory live session, this endpoint returns that active session and its `status` before doing fresh OpenF1 discovery, which keeps browser reloads resilient during transient discovery failures. If OpenF1 discovery finds an active race or sprint that has not been started in the backend yet, the response has `active: true` and `status: null`; the frontend then calls `/live/start` to create the runtime snapshot state. When no session is active but a future race or sprint exists in the current OpenF1 season payload, inactive responses may include `next_session` and `next_meeting` so the dashboard can show what live session it is waiting for. Discovery failures are reported as `{ "availability": "error", "active": false, "message": "..." }` rather than as a failed app startup path, so the dashboard can stay usable for historical replay while making live status visible. The frontend calls this endpoint on startup, polls it periodically while availability remains `inactive` or retryable, and also exposes a manual `OPEN LIVE` action so a user can open a live race after the app has already loaded.
+
+OpenF1 polling is cadenced by channel inside the backend live runtime. High-motion channels (`position`, `location`) refresh at roughly `0.5s`; interval/timing support channels refresh around `1-2s`; static or slower channels (`drivers`, `stints`, `weather`, `session_result`) are cached longer and reused between live snapshots. Individual OpenF1 live HTTP requests have a bounded timeout so a slow endpoint cannot freeze live refresh indefinitely. If an endpoint fails transiently, the last successful payload for that endpoint can be reused and reported as cached with `last_error`, so the live dashboard degrades instead of losing the whole snapshot.
+
+If live start is inside the session window but OpenF1 has not published usable driver/timing/location rows yet, `/live/start` returns `503 Service Unavailable` with the initial snapshot message. The frontend treats this as a waiting/retry state, not a fatal live configuration failure. If a required initial OpenF1 channel fails at the HTTP/API layer, `/live/start` returns `502 Bad Gateway` so operators can distinguish upstream failure from normal pre-row warmup.
+
+`/live/status` includes `source: "openf1_live"`, `updated_at`, and `channels`, a compact endpoint health list with `endpoint`, `state`, `age_seconds`, `rows`, and optional `last_error`. State values are `fresh`, `cached`, `stale`, `missing`, and `failed`. Optional event-like feeds such as `pit`, `race_control`, and `session_result` may be `fresh` with `rows: 0`; this means OpenF1 responded successfully and no rows are currently expected, not that the channel is broken. If a refresh receives malformed live rows after a session is already running, the backend keeps the last good snapshot visible and adds a synthetic `refresh` channel with `state: "failed"` and `last_error` explaining the normalization failure. The frontend uses these values for live endpoint badges while keeping all dashboard panels driven by `ReplaySnapshot`.
+
+For real-session validation, `scripts/check-live-current.ps1 -Strict` asserts critical-channel health, `/live/status.updated_at` freshness, and that the current snapshot has enough timing/map rows to drive the core dashboard panels. Strict mode expands to `-FailOnBadChannels -MaxUpdateAgeSeconds 15 -MinTimingRows 10 -MinTrackPositions 10`, while allowing degradable feeds such as intervals, pit, race-control, stints, weather, and session-result to be bad without failing when the core snapshot is healthy. Pass `-AllowedBadChannels @()` to make every bad channel fail. Add `-MinGeometryPoints 20` once cached, historical, or accumulated live location geometry is expected. Add `-MinEvents 1` once race-control, pit, weather, or derived events are expected. Add `-ExpectedMeetingName`, `-ExpectedSessionType`, and/or `-ExpectedSessionKey` to fail fast when OpenF1 reports a different live session than the one being validated.
+
+`/live/metadata` returns the current in-memory live `ReplayMetadata` response directly. This mirrors historical replay metadata lookup and gives reconnecting or freshly opened clients a stable metadata payload before the SSE stream's `metadata` event arrives. Live metadata uses `frame_step_seconds: 0.5`, `data_sources[0].name: "openf1_live"`, and live endpoint links:
+
+```json
+{
+  "snapshot_endpoint": "/api/sessions/{session_key}/live/snapshot",
+  "stream_endpoint": "/api/sessions/{session_key}/live/stream",
+  "events_endpoint": "/api/sessions/{session_key}/live/events",
+  "track_geometry_endpoint": "/api/sessions/{session_key}/live/track/geometry"
+}
+```
+
+Live track geometry is selected by the backend. The live runtime first uses geometry already stored for the active live session, then reuses ready geometry from a cached historical session with the same meeting country/location, and only then derives geometry from incoming OpenF1 `location` rows or falls back to schematic geometry. Reused historical geometry is returned with the live `session_key`, so frontend rendering remains source-agnostic and can treat it like any other `TrackGeometry`.
+
+`/live/events` returns the current in-memory live event timeline as a `ReplayEventListResponse`. This gives reconnecting clients and freshly opened dashboards an immediate event feed without waiting for the next SSE event window.
+
+`/live/stream` emits typed `event` frames in addition to `metadata` and `snapshot`. Live event payloads use the same `ReplayEvent` shape as replay events and are generated from normalized race-control, pit, weather, gap, and driver-status records. This keeps real live, live simulation, and replay aligned on the same contract family.
+
+The frontend treats real live as a first-class dashboard mode: scrub and speed controls are disabled, streamed `event` frames populate the event feed, endpoint health badges come from `/live/status`, and SSE disconnects use explicit exponential backoff reconnect attempts while keeping the latest good snapshot visible.
 
 ### `GET /api/sessions/{session_key}/track/geometry`
 

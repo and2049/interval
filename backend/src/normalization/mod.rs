@@ -177,6 +177,38 @@ mod tests {
     }
 
     #[test]
+    fn tolerates_incomplete_openf1_session_labels() {
+        let sessions = race_sessions_from_openf1(json!([
+            {
+                "session_key": 11,
+                "meeting_key": 10,
+                "session_name": null,
+                "session_type": "Race",
+                "date_start": "2026-07-05T14:00:00+00:00",
+                "date_end": null,
+                "year": 2026
+            },
+            {
+                "session_key": 12,
+                "meeting_key": 10,
+                "session_name": "Sprint",
+                "session_type": null,
+                "date_start": "2026-07-04T14:00:00+00:00",
+                "date_end": null,
+                "year": 2026
+            }
+        ]))
+        .unwrap();
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].name, "Race");
+        assert_eq!(sessions[0].session_type, SessionType::Race);
+        assert_eq!(sessions[0].end_time, "");
+        assert_eq!(sessions[1].name, "Sprint");
+        assert_eq!(sessions[1].session_type, SessionType::Sprint);
+    }
+
+    #[test]
     fn normalizes_interval_strings_and_numbers() {
         let endpoint = RawEndpoint {
             endpoint: "intervals".to_string(),

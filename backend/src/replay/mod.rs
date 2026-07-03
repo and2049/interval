@@ -1,14 +1,14 @@
 mod cache_rebuild;
 mod curated_tracks;
 mod derived_events;
-mod events;
+pub(crate) mod events;
 mod generator;
-mod indexed_data;
+pub(crate) mod indexed_data;
 mod ingest_summary;
-mod metadata_builder;
-mod snapshot_builder;
+pub(crate) mod metadata_builder;
+pub(crate) mod snapshot_builder;
 pub mod streaming;
-mod track_geometry_builder;
+pub(crate) mod track_geometry_builder;
 mod track_geometry_math;
 pub mod track_projection;
 

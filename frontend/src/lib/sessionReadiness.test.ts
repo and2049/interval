@@ -6,6 +6,7 @@ import {
   ingestOutcome,
   ingestOutcomeClass,
   isBusySessionAction,
+  isSessionActionDisabled,
   sessionIngestErrorMessage,
   sessionActionLabel,
   sessionActionStatus,
@@ -148,6 +149,51 @@ describe("session action state helpers", () => {
     expect(sessionActionStatus("opening_replay")).toBe("Opening replay...");
     expect(sessionActionStatus("idle")).toBeUndefined();
     expect(sessionActionStatus("failed")).toBeUndefined();
+  });
+});
+
+describe("isSessionActionDisabled", () => {
+  test("locks historical open and ingest actions while live owns the dashboard", () => {
+    expect(
+      isSessionActionDisabled({
+        selectedSession: 9472,
+        readiness: readiness({ replay_ready: true }),
+        ingestState: "idle",
+        liveActive: false
+      })
+    ).toBe(false);
+
+    expect(
+      isSessionActionDisabled({
+        selectedSession: 9472,
+        readiness: readiness({ replay_ready: true }),
+        ingestState: "idle",
+        liveActive: true
+      })
+    ).toBe(true);
+  });
+
+  test("disables actions for missing, unavailable, or busy selections", () => {
+    expect(
+      isSessionActionDisabled({
+        readiness: readiness({ replay_ready: true }),
+        ingestState: "idle"
+      })
+    ).toBe(true);
+    expect(
+      isSessionActionDisabled({
+        selectedSession: 9472,
+        readiness: readiness({ support_status: "cancelled" }),
+        ingestState: "idle"
+      })
+    ).toBe(true);
+    expect(
+      isSessionActionDisabled({
+        selectedSession: 9472,
+        readiness: readiness({ replay_ready: true }),
+        ingestState: "ingesting"
+      })
+    ).toBe(true);
   });
 });
 

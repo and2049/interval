@@ -1,9 +1,16 @@
-import type { DataQuality, MapMode, ReplayMetadata } from "../../../shared/types/api";
+import type {
+  DataQuality,
+  LiveChannelHealth,
+  LiveSessionStatus,
+  MapMode,
+  ReplayMetadata
+} from "../../../shared/types/api";
 
 export interface ChannelBadge {
   label: string;
   ready: boolean;
   tone: "ready" | "degraded" | "missing";
+  title?: string;
 }
 
 export function channelBadges(metadata: ReplayMetadata): ChannelBadge[] {
@@ -30,10 +37,43 @@ export function channelBadges(metadata: ReplayMetadata): ChannelBadge[] {
   ];
 }
 
+export function liveChannelBadges(channels: LiveChannelHealth[]): ChannelBadge[] {
+  return channels.map((channel) => ({
+    label: channel.endpoint.toUpperCase(),
+    ready: channel.state === "fresh" || channel.state === "cached",
+    tone: liveChannelTone(channel),
+    title: liveChannelTitle(channel)
+  }));
+}
+
+export function liveDashboardBadges(
+  metadata: ReplayMetadata,
+  channels: LiveChannelHealth[]
+): ChannelBadge[] {
+  return [sourceBadge(metadata), ...liveChannelBadges(channels)];
+}
+
+export function liveStatusLabel(
+  connection: string | undefined,
+  status?: LiveSessionStatus,
+  nowMs = Date.now()
+): string {
+  const state = connection ?? "idle";
+  const updatedAt = status?.updated_at ? Date.parse(status.updated_at) : Number.NaN;
+  if (!Number.isFinite(updatedAt)) return `LIVE ${state}`;
+
+  const ageSeconds = Math.max(0, Math.round((nowMs - updatedAt) / 1000));
+  return `LIVE ${state} · UPDATED ${ageSeconds}s`;
+}
+
 function sourceBadge(metadata: ReplayMetadata): ChannelBadge {
   const source = metadata.data_sources[0]?.name;
   const label = `${sourceLabel(source)} · ${cadenceLabel(metadata.frame_step_seconds)}`;
-  return { label, ready: true, tone: source === "fastf1_historical" ? "ready" : "degraded" };
+  return {
+    label,
+    ready: true,
+    tone: source === "fastf1_historical" || source === "live_simulation" || source === "openf1_live" ? "ready" : "degraded"
+  };
 }
 
 function cacheBadge(metadata: ReplayMetadata): ChannelBadge {
@@ -43,6 +83,10 @@ function cacheBadge(metadata: ReplayMetadata): ChannelBadge {
 
 function sourceLabel(source?: string) {
   switch (source) {
+    case "live_simulation":
+      return "Live Sim";
+    case "openf1_live":
+      return "LIVE · OpenF1";
     case "fastf1_historical":
       return "FastF1";
     case "openf1_historical":
@@ -133,6 +177,29 @@ function badge(label: string, ready: boolean): ChannelBadge {
     ready,
     tone: ready ? "ready" : "missing"
   };
+}
+
+function liveChannelTone(channel: LiveChannelHealth): ChannelBadge["tone"] {
+  switch (channel.state) {
+    case "fresh":
+      return "ready";
+    case "cached":
+      if (channel.rows === 0) return "missing";
+      return channel.last_error ? "degraded" : "ready";
+    case "stale":
+      return "degraded";
+    default:
+      return "missing";
+  }
+}
+
+function liveChannelTitle(channel: LiveChannelHealth): string {
+  const rows = channel.rows == null ? "" : ` · ${channel.rows} rows`;
+  const age = channel.age_seconds == null
+    ? ""
+    : ` · ${Math.max(0, Math.round(channel.age_seconds))}s old`;
+  const error = channel.last_error ? ` · ${channel.last_error}` : "";
+  return `${channel.endpoint}: ${channel.state}${rows}${age}${error}`;
 }
 
 function geometryLabel(metadata: ReplayMetadata) {

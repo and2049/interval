@@ -71,6 +71,20 @@ export function canStartSessionAction(readiness?: SessionReadiness) {
   return Boolean(readiness && isSessionSupported(readiness));
 }
 
+export function isSessionActionDisabled(args: {
+  selectedSession?: number;
+  readiness?: SessionReadiness;
+  ingestState: SessionActionState;
+  liveActive?: boolean;
+}) {
+  return (
+    args.selectedSession == null ||
+    args.liveActive === true ||
+    !canStartSessionAction(args.readiness) ||
+    isBusySessionAction(args.ingestState)
+  );
+}
+
 export function canOpenSessionFromCache(readiness?: SessionReadiness) {
   return Boolean(isSessionSupported(readiness) && (readiness?.replay_ready || readiness?.is_demo));
 }

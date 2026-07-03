@@ -1,4 +1,11 @@
-import type { ReplayMetadata, ReplaySnapshot, TrackGeometry } from "../../../shared/types/api";
+import type {
+  LiveAvailability,
+  Meeting,
+  ReplayMetadata,
+  ReplaySnapshot,
+  Session,
+  TrackGeometry
+} from "../../../shared/types/api";
 
 const ALLOWED_SPEEDS = [0.5, 1, 2, 4] as const;
 
@@ -143,14 +150,15 @@ export function replayLoadMessage(options: {
   snapshotError?: unknown;
   sessionKey?: number;
   selectedSessionLabel?: string;
+  liveStatusMessage?: string;
 }): string {
   if (options.metadataLoading && !options.metadata) return "Connecting to replay cache...";
   if (options.snapshotLoading && options.metadata) return "Loading replay frame...";
   if (options.metadataError) {
     if (isMissingReplay(options.metadataError)) {
       return options.selectedSessionLabel
-        ? `No cached replay for selected race: ${options.selectedSessionLabel}. Choose INGEST + OPEN.`
-        : "Replay is not cached yet. Choose INGEST + OPEN for this session.";
+        ? `No cached replay for selected race: ${options.selectedSessionLabel}. Ingest starts automatically when supported.`
+        : "Replay is not cached yet. Select a supported race or sprint to ingest it.";
     }
     return errorText(options.metadataError, "Replay metadata unavailable.");
   }
@@ -158,10 +166,70 @@ export function replayLoadMessage(options: {
   if (options.metadata) return "Loading replay frame...";
   if (options.sessionKey == null) {
     return options.selectedSessionLabel
-      ? `No cached replay for selected race: ${options.selectedSessionLabel}. Choose INGEST + OPEN.`
-      : "Select a historical race, then choose INGEST + OPEN.";
+      ? `No cached replay for selected race: ${options.selectedSessionLabel}. Ingest starts automatically when supported.`
+      : options.liveStatusMessage?.trim()
+        || "Live races open automatically when available. Select a historical race or sprint to replay.";
   }
   return "Connecting to replay cache...";
+}
+
+export function shouldClearMissingHistoricalReplay(options: {
+  metadataError?: unknown;
+  metadataLoading?: boolean;
+  sessionKey?: number;
+  liveActive?: boolean;
+  liveSimulationActive?: boolean;
+}): boolean {
+  return Boolean(
+    options.sessionKey != null
+      && !options.metadataLoading
+      && !options.liveActive
+      && !options.liveSimulationActive
+      && options.metadataError
+      && isMissingReplay(options.metadataError)
+  );
+}
+
+export function shouldApplyLiveStartResult(
+  requestId: number,
+  latestRequestId: number
+): boolean {
+  return requestId === latestRequestId;
+}
+
+export function shouldApplyLiveResourceResult(
+  resourceSessionKey: number | undefined,
+  currentSessionKey: number | undefined,
+  liveActive: boolean
+): boolean {
+  return liveActive && resourceSessionKey != null && resourceSessionKey === currentSessionKey;
+}
+
+export function shouldHideHistoricalResourceError(liveActive: boolean): boolean {
+  return liveActive;
+}
+
+export function openF1LiveSessionKeyToStop(
+  currentSessionKey: number | undefined,
+  liveActive: boolean
+): number | undefined {
+  return liveActive && currentSessionKey != null ? currentSessionKey : undefined;
+}
+
+export function liveSimulationSessionKeyToStop(
+  currentSessionKey: number | undefined,
+  liveSimulationActive: boolean
+): number | undefined {
+  return liveSimulationActive && currentSessionKey != null ? currentSessionKey : undefined;
+}
+
+export function sessionKeyAfterLiveStops(
+  liveSessionKey: number | undefined,
+  returnSessionKey: number | undefined
+): number | undefined {
+  return returnSessionKey != null && returnSessionKey !== liveSessionKey
+    ? returnSessionKey
+    : undefined;
 }
 
 export function replaySessionTitle(metadata: ReplayMetadata): string {
@@ -170,6 +238,71 @@ export function replaySessionTitle(metadata: ReplayMetadata): string {
   return meetingName
     ? `${metadata.session.year} ${meetingName} · ${sessionName}`
     : `${metadata.session.year} ${sessionName} · #${metadata.session.session_key}`;
+}
+
+export function serverSentErrorMessage(event: Event): string | undefined {
+  const data = (event as MessageEvent).data;
+  return typeof data === "string" && data.trim() ? data : undefined;
+}
+
+export function liveCurrentMessage(
+  availability: LiveAvailability,
+  message?: string | null,
+  nextSession?: Session | null,
+  nextMeeting?: Meeting | null
+): string | undefined {
+  switch (availability) {
+    case "disabled":
+      return message?.trim() || "LIVE disabled";
+    case "inactive":
+      if (nextSession) {
+        const meeting = nextMeeting?.name?.trim();
+        const session = nextSession.name.trim() || `Session ${nextSession.session_key}`;
+        const start = liveSessionStartLabel(nextSession.start_time);
+        return meeting
+          ? `Next live: ${nextSession.year} ${meeting} · ${session}${start}`
+          : `Next live: ${nextSession.year} ${session}${start}`;
+      }
+      return message?.trim() || "No active live race or sprint";
+    case "error":
+      return message?.trim() || "OpenF1 live status unavailable";
+    default:
+      return undefined;
+  }
+}
+
+export function liveCheckErrorMessage(error: unknown): string {
+  return errorText(error, "OpenF1 live status unavailable.");
+}
+
+export function liveStartErrorMessage(error: unknown): string {
+  const text = errorText(error, "OpenF1 live session could not be opened.");
+  return isWaitingForOpenF1LiveDataError(error)
+    ? `Waiting for OpenF1 live data. ${text}`
+    : text;
+}
+
+export function isWaitingForOpenF1LiveDataError(error: unknown): boolean {
+  return errorText(error, "").includes("OpenF1 live initial snapshot has no");
+}
+
+export function liveAvailabilityAfterStartError(error: unknown): LiveAvailability {
+  return isWaitingForOpenF1LiveDataError(error) ? "inactive" : "error";
+}
+
+export function shouldPollLiveAvailability(availability: LiveAvailability): boolean {
+  return availability === "inactive" || availability === "error";
+}
+
+export function liveAvailabilityPollDelayMs(
+  availability: LiveAvailability,
+  message?: string
+): number {
+  if (availability === "inactive" && message?.startsWith("Waiting for OpenF1 live data.")) {
+    return 10_000;
+  }
+  if (availability === "inactive" || availability === "error") return 60_000;
+  return Number.POSITIVE_INFINITY;
 }
 
 function isMissingReplay(error: unknown): boolean {
@@ -181,4 +314,16 @@ function errorText(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) return error.message;
   if (typeof error === "string" && error.trim()) return error;
   return fallback;
+}
+
+function liveSessionStartLabel(startTime: string): string {
+  const parsed = Date.parse(startTime);
+  if (!Number.isFinite(parsed)) return "";
+  const date = new Date(parsed);
+  const yyyy = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mm = String(date.getUTCMinutes()).padStart(2, "0");
+  return ` · ${yyyy}-${month}-${day} ${hh}:${mm} UTC`;
 }

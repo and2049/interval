@@ -60,6 +60,10 @@ fn data_source(source: crate::normalization::RaceDataSource) -> DataSource {
             name: "openf1_historical".to_string(),
             mode: "historical".to_string(),
         },
+        crate::normalization::RaceDataSource::OpenF1Live => DataSource {
+            name: "openf1_live".to_string(),
+            mode: "live".to_string(),
+        },
         crate::normalization::RaceDataSource::Demo => DataSource {
             name: "demo".to_string(),
             mode: "offline".to_string(),

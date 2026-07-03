@@ -13,6 +13,8 @@ use thiserror::Error;
 
 mod discovery;
 mod ingest;
+mod live;
+mod live_simulation;
 mod replay_routes;
 mod stream;
 
@@ -21,6 +23,8 @@ pub struct AppState {
     pub(crate) pool: SqlitePool,
     pub(crate) historical: HistoricalClient,
     pub(crate) fastf1: FastF1HistoricalClient,
+    pub(crate) live: crate::live::OpenF1LiveRegistry,
+    pub(crate) live_simulation: crate::live_simulation::LiveSimulationRegistry,
 }
 
 impl AppState {
@@ -29,6 +33,10 @@ impl AppState {
             pool,
             historical,
             fastf1: FastF1HistoricalClient::default(),
+            live: crate::live::OpenF1LiveRegistry::new(
+                crate::connectors::openf1_live::OpenF1LiveClient::default(),
+            ),
+            live_simulation: crate::live_simulation::LiveSimulationRegistry::default(),
         }
     }
 
@@ -42,6 +50,25 @@ impl AppState {
             pool,
             historical,
             fastf1,
+            live: crate::live::OpenF1LiveRegistry::new(
+                crate::connectors::openf1_live::OpenF1LiveClient::default(),
+            ),
+            live_simulation: crate::live_simulation::LiveSimulationRegistry::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_with_live(
+        pool: SqlitePool,
+        historical: HistoricalClient,
+        live_client: crate::connectors::openf1_live::OpenF1LiveClient,
+    ) -> Self {
+        Self {
+            pool,
+            historical,
+            fastf1: FastF1HistoricalClient::default(),
+            live: crate::live::OpenF1LiveRegistry::new(live_client),
+            live_simulation: crate::live_simulation::LiveSimulationRegistry::default(),
         }
     }
 }
@@ -52,6 +79,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/seasons", get(discovery::seasons))
         .route("/api/meetings", get(discovery::meetings))
         .route("/api/sessions", get(discovery::sessions))
+        .route("/api/live/current", get(live::current))
         .route(
             "/api/sessions/{session_key}/ingest",
             post(ingest::ingest_session),
@@ -76,6 +104,43 @@ pub fn router(state: AppState) -> Router {
             "/api/sessions/{session_key}/track/geometry",
             get(replay_routes::track_geometry),
         )
+        .route("/api/sessions/{session_key}/live/start", post(live::start))
+        .route("/api/sessions/{session_key}/live/status", get(live::status))
+        .route(
+            "/api/sessions/{session_key}/live/metadata",
+            get(live::metadata),
+        )
+        .route(
+            "/api/sessions/{session_key}/live/snapshot",
+            get(live::snapshot),
+        )
+        .route("/api/sessions/{session_key}/live/stream", get(live::stream))
+        .route(
+            "/api/sessions/{session_key}/live/track/geometry",
+            get(live::track_geometry),
+        )
+        .route("/api/sessions/{session_key}/live/events", get(live::events))
+        .route("/api/sessions/{session_key}/live/stop", post(live::stop))
+        .route(
+            "/api/sessions/{session_key}/live-simulation/start",
+            post(live_simulation::start),
+        )
+        .route(
+            "/api/sessions/{session_key}/live-simulation/status",
+            get(live_simulation::status),
+        )
+        .route(
+            "/api/sessions/{session_key}/live-simulation/snapshot",
+            get(live_simulation::snapshot),
+        )
+        .route(
+            "/api/sessions/{session_key}/live-simulation/stream",
+            get(live_simulation::stream),
+        )
+        .route(
+            "/api/sessions/{session_key}/live-simulation/stop",
+            post(live_simulation::stop),
+        )
         .with_state(state)
 }
 
@@ -92,6 +157,10 @@ struct Health {
 pub enum ApiError {
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("bad gateway: {0}")]
+    BadGateway(String),
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
     #[error("resource not found")]
     NotFound,
     #[error("database error: {0}")]
@@ -108,6 +177,8 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::BadGateway(_) => StatusCode::BAD_GATEWAY,
+            ApiError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Historical(_) | ApiError::FastF1Historical(_) => StatusCode::BAD_GATEWAY,
             ApiError::Database(_) | ApiError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,

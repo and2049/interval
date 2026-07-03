@@ -30,6 +30,7 @@ pub fn generate_replay(mut session: Session, data: RaceData) -> anyhow::Result<G
             crate::domain::TrackGeometrySource::FastF1Telemetry
         }
         crate::normalization::RaceDataSource::OpenF1Historical
+        | crate::normalization::RaceDataSource::OpenF1Live
         | crate::normalization::RaceDataSource::Demo => {
             crate::domain::TrackGeometrySource::OpenF1Location
         }
@@ -93,6 +94,7 @@ fn snapshot_step_seconds(data: &RaceData) -> f64 {
     match data.source {
         crate::normalization::RaceDataSource::FastF1Historical => FASTF1_SNAPSHOT_STEP_SECONDS,
         crate::normalization::RaceDataSource::OpenF1Historical
+        | crate::normalization::RaceDataSource::OpenF1Live
         | crate::normalization::RaceDataSource::Demo => DEFAULT_SNAPSHOT_STEP_SECONDS,
     }
 }

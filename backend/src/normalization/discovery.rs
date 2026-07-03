@@ -21,12 +21,20 @@ pub fn race_sessions_from_openf1(payload: Value) -> anyhow::Result<Vec<Session>>
     Ok(rows
         .into_iter()
         .filter_map(|row| {
-            let session_type = supported_session_type(&row.session_type, &row.session_name)?;
+            let session_type_label = row.session_type.as_deref().unwrap_or_default();
+            let session_name_label = row.session_name.as_deref().unwrap_or_default();
+            let session_type = supported_session_type(session_type_label, session_name_label)?;
+            let name = row
+                .session_name
+                .filter(|value| !value.trim().is_empty())
+                .or(row.session_type)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| format!("Session {}", row.session_key));
             Some(Session {
                 session_key: row.session_key,
                 meeting_key: row.meeting_key,
                 year: row.year,
-                name: row.session_name,
+                name,
                 session_type,
                 start_time: row.date_start.unwrap_or_default(),
                 end_time: row.date_end.unwrap_or_default(),
@@ -61,8 +69,8 @@ struct OpenF1Meeting {
 struct OpenF1Session {
     session_key: i64,
     meeting_key: i64,
-    session_name: String,
-    session_type: String,
+    session_name: Option<String>,
+    session_type: Option<String>,
     date_start: Option<String>,
     date_end: Option<String>,
     year: i32,

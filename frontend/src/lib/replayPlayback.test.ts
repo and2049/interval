@@ -7,7 +7,15 @@ import {
   activeTrackGeometry,
   advanceReplayTime,
   clampReplayTime,
+  isWaitingForOpenF1LiveDataError,
+  liveAvailabilityAfterStartError,
+  liveAvailabilityPollDelayMs,
+  liveCheckErrorMessage,
+  liveCurrentMessage,
+  liveSimulationSessionKeyToStop,
+  liveStartErrorMessage,
   nextReplayTick,
+  openF1LiveSessionKeyToStop,
   normalizeReplaySpeed,
   parseReplaySpeedInput,
   parseReplayTimeInput,
@@ -15,6 +23,13 @@ import {
   replayResourceSessionKey,
   replayLoadMessage,
   replaySessionTitle,
+  serverSentErrorMessage,
+  sessionKeyAfterLiveStops,
+  shouldApplyLiveResourceResult,
+  shouldApplyLiveStartResult,
+  shouldClearMissingHistoricalReplay,
+  shouldHideHistoricalResourceError,
+  shouldPollLiveAvailability,
   snapshotRequest,
   shouldReloadSession
 } from "./replayPlayback";
@@ -214,31 +229,140 @@ describe("replayLoadMessage", () => {
         metadataError: new Error("resource not found"),
         sessionKey: 9472
       })
-    ).toBe("Replay is not cached yet. Choose INGEST + OPEN for this session.");
+    ).toBe("Replay is not cached yet. Select a supported race or sprint to ingest it.");
     expect(
       replayLoadMessage({
         metadataError: "404 Not Found",
         sessionKey: 42,
         selectedSessionLabel: "2025 Race #42"
       })
-    ).toBe("No cached replay for selected race: 2025 Race #42. Choose INGEST + OPEN.");
+    ).toBe("No cached replay for selected race: 2025 Race #42. Ingest starts automatically when supported.");
   });
 
   test("explains empty selection and selected uncached states", () => {
     expect(replayLoadMessage({ sessionKey: undefined })).toBe(
-      "Select a historical race, then choose INGEST + OPEN."
+      "Live races open automatically when available. Select a historical race or sprint to replay."
     );
     expect(
       replayLoadMessage({
         sessionKey: undefined,
-        selectedSessionLabel: "2025 Race #1234"
+        liveStatusMessage: "Checking live race status..."
       })
-    ).toBe("No cached replay for selected race: 2025 Race #1234. Choose INGEST + OPEN.");
+    ).toBe("Checking live race status...");
+    expect(
+      replayLoadMessage({
+        sessionKey: undefined,
+        selectedSessionLabel: "2025 Race #1234",
+        liveStatusMessage: "No active live race or sprint"
+      })
+    ).toBe("No cached replay for selected race: 2025 Race #1234. Ingest starts automatically when supported.");
   });
 
   test("distinguishes metadata and frame loading states", () => {
     expect(replayLoadMessage({ sessionKey: 9472 })).toBe("Connecting to replay cache...");
     expect(replayLoadMessage({ metadata: metadata(9472) })).toBe("Loading replay frame...");
+  });
+});
+
+describe("shouldClearMissingHistoricalReplay", () => {
+  test("clears stale historical sessions when cached metadata is missing", () => {
+    expect(
+      shouldClearMissingHistoricalReplay({
+        metadataError: new Error("resource not found"),
+        sessionKey: 9472
+      })
+    ).toBe(true);
+    expect(
+      shouldClearMissingHistoricalReplay({
+        metadataError: "404 Not Found",
+        sessionKey: 9472
+      })
+    ).toBe(true);
+  });
+
+  test("does not clear active live sessions when historical metadata is missing", () => {
+    expect(
+      shouldClearMissingHistoricalReplay({
+        metadataError: new Error("resource not found"),
+        sessionKey: 88001,
+        liveActive: true
+      })
+    ).toBe(false);
+    expect(
+      shouldClearMissingHistoricalReplay({
+        metadataError: "404 Not Found",
+        sessionKey: 9839,
+        liveSimulationActive: true
+      })
+    ).toBe(false);
+  });
+
+  test("ignores loading, non-missing errors, and empty session state", () => {
+    expect(
+      shouldClearMissingHistoricalReplay({
+        metadataError: new Error("resource not found"),
+        metadataLoading: true,
+        sessionKey: 9472
+      })
+    ).toBe(false);
+    expect(
+      shouldClearMissingHistoricalReplay({
+        metadataError: new Error("database unavailable"),
+        sessionKey: 9472
+      })
+    ).toBe(false);
+    expect(
+      shouldClearMissingHistoricalReplay({
+        metadataError: new Error("resource not found")
+      })
+    ).toBe(false);
+  });
+});
+
+describe("shouldApplyLiveStartResult", () => {
+  test("only applies the latest live start request", () => {
+    expect(shouldApplyLiveStartResult(3, 3)).toBe(true);
+    expect(shouldApplyLiveStartResult(2, 3)).toBe(false);
+  });
+});
+
+describe("shouldApplyLiveResourceResult", () => {
+  test("applies live resources only for the active live session", () => {
+    expect(shouldApplyLiveResourceResult(88001, 88001, true)).toBe(true);
+    expect(shouldApplyLiveResourceResult(88001, 9472, true)).toBe(false);
+    expect(shouldApplyLiveResourceResult(88001, 88001, false)).toBe(false);
+    expect(shouldApplyLiveResourceResult(undefined, 88001, true)).toBe(false);
+  });
+});
+
+describe("shouldHideHistoricalResourceError", () => {
+  test("hides historical cache errors while real live mode owns resources", () => {
+    expect(shouldHideHistoricalResourceError(true)).toBe(true);
+    expect(shouldHideHistoricalResourceError(false)).toBe(false);
+  });
+});
+
+describe("sessionKeyAfterLiveStops", () => {
+  test("returns a previous replay session only when it differs from the live session", () => {
+    expect(sessionKeyAfterLiveStops(88001, 9472)).toBe(9472);
+    expect(sessionKeyAfterLiveStops(88001, 88001)).toBeUndefined();
+    expect(sessionKeyAfterLiveStops(88001, undefined)).toBeUndefined();
+  });
+});
+
+describe("openF1LiveSessionKeyToStop", () => {
+  test("returns the active live key when leaving OpenF1 live mode", () => {
+    expect(openF1LiveSessionKeyToStop(88001, true)).toBe(88001);
+    expect(openF1LiveSessionKeyToStop(88001, false)).toBeUndefined();
+    expect(openF1LiveSessionKeyToStop(undefined, true)).toBeUndefined();
+  });
+});
+
+describe("liveSimulationSessionKeyToStop", () => {
+  test("returns the active simulation key when leaving live simulation mode", () => {
+    expect(liveSimulationSessionKeyToStop(9472, true)).toBe(9472);
+    expect(liveSimulationSessionKeyToStop(9472, false)).toBeUndefined();
+    expect(liveSimulationSessionKeyToStop(undefined, true)).toBeUndefined();
   });
 });
 
@@ -250,6 +374,114 @@ describe("replaySessionTitle", () => {
   test("falls back to session identity when meeting context is unavailable", () => {
     const replayMetadata = metadata(9472);
     expect(replaySessionTitle({ ...replayMetadata, meeting: null })).toBe("2024 Race · #9472");
+  });
+});
+
+describe("serverSentErrorMessage", () => {
+  test("extracts backend SSE error payloads", () => {
+    expect(serverSentErrorMessage({ data: "live snapshot refresh failed" } as MessageEvent)).toBe(
+      "live snapshot refresh failed"
+    );
+  });
+
+  test("ignores transport-style error events without payload data", () => {
+    expect(serverSentErrorMessage(new Event("error"))).toBeUndefined();
+    expect(serverSentErrorMessage({ data: "" } as MessageEvent)).toBeUndefined();
+  });
+});
+
+describe("liveCurrentMessage", () => {
+  test("uses backend-provided live availability messages when present", () => {
+    expect(liveCurrentMessage("error", "OpenF1 live configuration error")).toBe(
+      "OpenF1 live configuration error"
+    );
+    expect(liveCurrentMessage("inactive", "No race today")).toBe("No race today");
+  });
+
+  test("labels the next live candidate when inactive", () => {
+    const next = metadata(88001);
+    expect(
+      liveCurrentMessage(
+        "inactive",
+        undefined,
+        { ...next.session, start_time: "2024-03-02T15:00:00Z" },
+        next.meeting
+      )
+    ).toBe("Next live: 2024 Bahrain Grand Prix · Race · 2024-03-02 15:00 UTC");
+  });
+
+  test("omits the next live start time when the timestamp is invalid", () => {
+    const next = metadata(88001);
+    expect(
+      liveCurrentMessage(
+        "inactive",
+        undefined,
+        { ...next.session, start_time: "not-a-date" },
+        next.meeting
+      )
+    ).toBe("Next live: 2024 Bahrain Grand Prix · Race");
+  });
+
+  test("falls back to concise live availability labels", () => {
+    expect(liveCurrentMessage("disabled")).toBe("LIVE disabled");
+    expect(liveCurrentMessage("inactive")).toBe("No active live race or sprint");
+    expect(liveCurrentMessage("error")).toBe("OpenF1 live status unavailable");
+    expect(liveCurrentMessage("active")).toBeUndefined();
+  });
+});
+
+describe("liveCheckErrorMessage", () => {
+  test("preserves thrown live-check errors for actionable feedback", () => {
+    expect(liveCheckErrorMessage(new Error("OpenF1 live configuration error"))).toBe(
+      "OpenF1 live configuration error"
+    );
+    expect(liveCheckErrorMessage("network unavailable")).toBe("network unavailable");
+  });
+});
+
+describe("liveStartErrorMessage", () => {
+  test("preserves live-start backend errors for actionable feedback", () => {
+    expect(liveStartErrorMessage(new Error("OpenF1 live initial snapshot has no driver data"))).toBe(
+      "Waiting for OpenF1 live data. OpenF1 live initial snapshot has no driver data"
+    );
+    expect(liveStartErrorMessage(undefined)).toBe("OpenF1 live session could not be opened.");
+  });
+
+  test("identifies temporary OpenF1 live warmup errors", () => {
+    expect(isWaitingForOpenF1LiveDataError("OpenF1 live initial snapshot has no timing/location data")).toBe(true);
+    expect(isWaitingForOpenF1LiveDataError("OpenF1 live request failed")).toBe(false);
+  });
+
+  test("keeps temporary live warmup failures in the retryable availability state", () => {
+    expect(liveAvailabilityAfterStartError("OpenF1 live initial snapshot has no driver data")).toBe("inactive");
+    expect(liveAvailabilityAfterStartError("OpenF1 live request failed")).toBe("error");
+  });
+});
+
+describe("shouldPollLiveAvailability", () => {
+  test("retries inactive and transient error states only", () => {
+    expect(shouldPollLiveAvailability("inactive")).toBe(true);
+    expect(shouldPollLiveAvailability("error")).toBe(true);
+    expect(shouldPollLiveAvailability("disabled")).toBe(false);
+    expect(shouldPollLiveAvailability("active")).toBe(false);
+  });
+});
+
+describe("liveAvailabilityPollDelayMs", () => {
+  test("keeps warmup checks responsive but backs off ordinary inactive and error states", () => {
+    expect(
+      liveAvailabilityPollDelayMs(
+        "inactive",
+        "Waiting for OpenF1 live data. OpenF1 live initial snapshot has no driver data"
+      )
+    ).toBe(10_000);
+    expect(liveAvailabilityPollDelayMs("inactive", "No active live race or sprint")).toBe(60_000);
+    expect(liveAvailabilityPollDelayMs("error", "OpenF1 live status unavailable")).toBe(60_000);
+  });
+
+  test("does not schedule polling for terminal availability states", () => {
+    expect(liveAvailabilityPollDelayMs("disabled")).toBe(Number.POSITIVE_INFINITY);
+    expect(liveAvailabilityPollDelayMs("active")).toBe(Number.POSITIVE_INFINITY);
   });
 });
 

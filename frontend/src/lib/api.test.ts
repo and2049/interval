@@ -115,6 +115,45 @@ describe("api parameter validation", () => {
       "/api/sessions/9472/replay/stream?from=12.346&speed=2.000"
     );
   });
+
+  test("formats live stream urls", () => {
+    expect(api.liveStreamUrl(9472)).toBe("/api/sessions/9472/live/stream");
+  });
+
+  test("formats live session lifecycle requests", async () => {
+    await withMockFetch(async (calls) => {
+      await api.liveCurrent();
+      await api.liveStart(9472);
+      await api.liveStatus(9472);
+      await api.liveMetadata(9472);
+      await api.liveSnapshot(9472);
+      await api.liveEvents(9472);
+      await api.liveTrackGeometry(9472);
+      await api.liveStop(9472);
+      for (const call of [
+        () => api.liveStart(0),
+        () => api.liveStatus(0),
+        () => api.liveMetadata(0),
+        () => api.liveSnapshot(0),
+        () => api.liveEvents(0),
+        () => api.liveTrackGeometry(0),
+        () => api.liveStop(0)
+      ]) {
+        expect(call).toThrow("session key must be a positive integer.");
+      }
+      expect(calls).toEqual([
+        "/api/live/current",
+        "/api/sessions/9472/live/start",
+        "/api/sessions/9472/live/status",
+        "/api/sessions/9472/live/metadata",
+        "/api/sessions/9472/live/snapshot",
+        "/api/sessions/9472/live/events",
+        "/api/sessions/9472/live/track/geometry",
+        "/api/sessions/9472/live/stop"
+      ]);
+    });
+  });
+
 });
 
 function ingestResponse(overrides: { status?: "ready" | "failed" } = {}) {

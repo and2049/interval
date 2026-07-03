@@ -2,6 +2,8 @@ pub mod analytics;
 pub mod api;
 pub mod connectors;
 pub mod domain;
+pub mod live;
+pub mod live_simulation;
 pub mod normalization;
 pub mod replay;
 pub mod startup;

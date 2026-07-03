@@ -4,7 +4,7 @@
 
 This project is an interactive Formula 1 second-screen dashboard designed for fans who are watching a race broadcast and want richer timing, strategy, and telemetry context on another screen. The product should feel inspired by real engineer-style displays while remaining understandable and usable for non-engineers.[cite:6]
 
-The initial build will be **replay-first** for easier development, testing, demos, and portfolio presentation. Historical OpenF1 data is available without authentication, while live data access during active sessions is part of a paid sponsor tier and is therefore a future phase rather than an MVP dependency.[cite:6][cite:20]
+The build is **replay-first and live-capable**: historical sessions provide deterministic development, testing, demos, and portfolio presentation, while live race mode uses OpenF1 behind the same backend-owned snapshot contract. Historical replay now uses FastF1 as the primary telemetry source, with OpenF1 still used for discovery and live-race polling.[cite:6][cite:20]
 
 [image:1]
 
@@ -19,9 +19,9 @@ The end goal is to build a polished, resume-worthy and genuinely useful F1 dashb
 - Replay a full race or session with synchronized data views.
 - Understand race context faster than the TV broadcast alone allows.
 - Compare drivers, stints, pace, and incidents in a single interface.
-- Eventually switch from historical replay mode to live race mode with minimal architectural changes.
+- Switch between historical replay, live simulation, and live race mode without changing dashboard panels.
 
-Long term, the project should be credible as both a fan product and a strong software engineering portfolio piece. It should demonstrate real-time systems thinking, strong domain modeling, efficient frontend rendering, clear UX for data-dense applications, and an architecture that can support both historical replay and future live ingestion.[cite:6][cite:20]
+Long term, the project should be credible as both a fan product and a strong software engineering portfolio piece. It should demonstrate real-time systems thinking, strong domain modeling, efficient frontend rendering, clear UX for data-dense applications, and an architecture that supports both historical replay and live ingestion.[cite:6][cite:20]
 
 ## Product Vision
 
@@ -44,7 +44,7 @@ The first release should prioritize depth over breadth. A smaller set of tightly
 
 ## Core User Experience
 
-A user opens the app, selects a season, event, session, and replay point, then watches the dashboard update in sync as the session progresses. They can pause, scrub, jump to notable events, compare drivers, inspect stints, and monitor race-control or weather context without leaving the main dashboard.
+A user opens the app and either joins an active live race/sprint when available or selects a historical season, event, and session. Historical mode supports pause, scrub, speed, and notable event context. Live mode disables replay controls and lets backend-streamed snapshots drive the dashboard clock while preserving the same timing, map, race-control, weather, and stint panels.
 
 The interface should be optimized for **quick scanning**. Users should be able to glance at the timing tower, strategy panel, and track map and immediately answer questions such as:
 
@@ -58,7 +58,9 @@ The interface should be optimized for **quick scanning**. Users should be able t
 
 ### Included in MVP
 
-- Historical session browser using OpenF1 data.[cite:6]
+- Historical session browser using OpenF1 discovery and FastF1 replay ingest.[cite:6]
+- OpenF1 live race/sprint mode enabled by default, with server-side configuration for credentials or explicit disablement.
+- Deterministic live simulation from cached historical replays for local testing.
 - Replay engine with play, pause, speed control, and timeline scrubbing.
 - Timing tower with gaps, intervals, tyre compound, stint age, sector colors, pit status, and lap state.
 - Track map with driver markers.
@@ -69,7 +71,8 @@ The interface should be optimized for **quick scanning**. Users should be able t
 
 ### Explicitly out of scope for MVP
 
-- Live session support.
+- Practice, qualifying, sprint qualifying, and other non-race/sprint replay modes.
+- Real-world live validation outside active OpenF1 live session windows.
 - Mobile-first or mobile-parity support for all dense panels.
 - Social features, accounts, or cloud sync.
 - Native desktop packaging.
@@ -83,15 +86,15 @@ The interface should be optimized for **quick scanning**. Users should be able t
 - **Frontend:** SolidJS.
 - **Styling/UI:** Tailwind CSS.
 - **Primary app type:** Web app.
-- **Data mode:** Replay-first, live-ready.
+- **Data mode:** Replay-first, live-capable.
 
-This stack is intended to balance performance, type safety, and a lightweight client. SolidJS is a good fit for a dashboard with many small, frequently updating UI regions, while Rust supports strong domain modeling, efficient replay processing, and future live-ingestion services.
+This stack is intended to balance performance, type safety, and a lightweight client. SolidJS is a good fit for a dashboard with many small, frequently updating UI regions, while Rust supports strong domain modeling, efficient replay processing, and live-ingestion services.
 
 ### Architectural principles
 
 - Keep the frontend thin; most replay logic and data shaping should live in the backend.
 - Separate raw data ingestion from normalized internal domain models.
-- Treat replay mode and future live mode as two inputs into the same application model.
+- Treat replay mode, live simulation, and OpenF1 live mode as inputs into the same application model.
 - Optimize for incremental rendering and fast screen updates.
 - Prefer simple deployable web architecture before exploring desktop or TUI variants.
 
@@ -107,8 +110,9 @@ This stack is intended to balance performance, type safety, and a lightweight cl
 
 ### Backend modules
 
-- `connectors/openf1_historical` — fetch and normalize historical data from OpenF1.[cite:6]
-- `connectors/openf1_live` — future live adapter for sponsor-tier access using REST/WebSocket/MQTT when enabled.[cite:6][cite:20]
+- `connectors/fastf1_historical` — backend-invoked Python extraction for historical race/sprint replay bundles.
+- `connectors/openf1_historical` — discovery and legacy historical fallback.[cite:6]
+- `connectors/openf1_live` — live adapter for OpenF1 REST polling when enabled.[cite:6][cite:20]
 - `domain/` — core entities such as session, driver, lap, sector, stint, race-control message, and weather sample.
 - `replay/` — timeline engine, seek logic, speed control, and event synchronization.
 - `analytics/` — derived metrics and strategy calculations.
@@ -140,7 +144,7 @@ The project should establish consistent language early. Recommended first-class 
 - `ReplayCursor`
 - `DerivedMetric`
 
-The goal is to avoid leaking raw API shapes directly into the UI. A clean internal model will make both replay mode and future live mode easier to support.
+The goal is to avoid leaking raw API shapes directly into the UI. A clean internal model lets replay, live simulation, and OpenF1 live use the same dashboard contract.
 
 ## UX Principles
 
@@ -148,7 +152,7 @@ The goal is to avoid leaking raw API shapes directly into the UI. A clean intern
 - Fast to scan at a glance.
 - Color should encode race meaning, not decoration.
 - Tables and matrices should be the core interaction model.
-- Panels should stay synchronized around a single replay cursor.
+- Panels should stay synchronized around a single backend-owned snapshot cursor, whether replay or live.
 - Important events should be discoverable from the timeline.
 - The default layout should be fan-friendly, with room for an advanced mode later.
 
@@ -160,7 +164,7 @@ The MVP is successful if it:
 - Makes timing, stint, and incident context easier to follow than the TV broadcast alone.
 - Demonstrates clear engineering depth in architecture and implementation.
 - Looks polished enough to feature prominently on a resume or portfolio.
-- Can plausibly evolve into a live-capable app without major rewrites.
+- Supports live race/sprint updates through the same dashboard panels as replay.
 
 ## Roadmap
 
@@ -190,18 +194,17 @@ The MVP is successful if it:
 - Improve loading states and error states.
 - Make the dashboard feel polished and demo-ready.
 
-### Phase 5 — Live mode
+### Phase 5 — Live validation and hardening
 
-- Add sponsor-tier OpenF1 live adapter once available for the project.
-- Support real-time updates through the same normalized internal event model.[cite:20][cite:6]
+- Keep OpenF1 live as a first-class dashboard mode.
+- Validate against real active race windows when available.
+- Improve channel degradation, reconnect behavior, and live-specific race-state semantics.[cite:20][cite:6]
 
-## Open Questions
+## Current Decisions
 
-These questions should be answered before implementation starts in earnest:
-
-1. Should the first target be only race sessions, or also practice and qualifying?
-2. Should the dashboard default to a fan-friendly layout or an engineer-dense layout?
-3. Which historical seasons should be first-class supported in the MVP?
-4. Should charts be minimal at first, with tables and timelines carrying most of the UI?
-5. Should local caching be file-based, SQLite-backed, or Postgres-backed from day one?
-6. What is the preferred deployment target for the first public demo?
+1. MVP scope is race and sprint sessions.
+2. Historical replay uses FastF1 telemetry cached through SQLite.
+3. OpenF1 remains the discovery source and the live-race source.
+4. Replay, live simulation, and OpenF1 live use the same `replay.v1` snapshot/event contract.
+5. The dashboard should stay fan-dense and data-first, with compact tables, timelines, map context, and channel-quality badges.
+6. Real OpenF1 live behavior still needs validation during an active race or sprint window.

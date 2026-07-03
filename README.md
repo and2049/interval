@@ -1,12 +1,12 @@
 # Interval
 
-Replay-first F1 second-screen dashboard for historical race and sprint sessions.
+Replay-first and live-capable F1 second-screen dashboard for race and sprint sessions.
 
-The MVP target is historical race and sprint replay using FastF1 data cached in SQLite, backend-owned replay snapshots, and a dense engineer-inspired SolidJS dashboard. The 2024 Bahrain Grand Prix race (`session_key=9472`) remains the seeded example and resolver override.
+The MVP target is historical race and sprint replay using FastF1 data cached in SQLite, plus OpenF1-backed live race mode behind the same `replay.v1` snapshot contract. The 2024 Bahrain Grand Prix race (`session_key=9472`) remains the seeded example and resolver override.
 
 ## Current Shape
 
-- `backend/`: Rust API service with Axum, SQLite, FastF1 historical ingest, OpenF1 discovery, replay generation, track geometry, and SSE streaming.
+- `backend/`: Rust API service with Axum, SQLite, FastF1 historical ingest, OpenF1 discovery/live polling, replay generation, track geometry, and SSE streaming.
 - `frontend/`: SolidJS, TypeScript, Vite, and Tailwind dashboard.
 - `shared/`: public replay API contract docs and TypeScript wire types.
 - `infra/`: early deployment notes.
@@ -69,7 +69,13 @@ Backend environment variables:
 - `INTERVAL_REBUILD_SESSION_ON_START`: optional session key to rebuild replay artifacts from cached raw historical data during backend startup. The smoke script uses `9472`.
 - `INTERVAL_FASTF1_PYTHON`: optional Python executable with FastF1 dependencies already installed. If omitted, the backend creates `cache/fastf1-venv` and installs `scripts/fastf1-requirements.txt` on first FastF1 ingest.
 - `INTERVAL_FASTF1_BOOTSTRAP_PYTHON`: optional Python executable used to create the managed FastF1 venv. Defaults to `python`.
+- `INTERVAL_OPENF1_LIVE_ENABLED`: OpenF1 live discovery and polling are enabled by default; set to `false`, `0`, `no`, or `off` to disable them for offline/dev runs.
+- `INTERVAL_OPENF1_LIVE_BASE_URL`: optional OpenF1-compatible live API base URL, defaults to `https://api.openf1.org/v1/`.
+- `INTERVAL_OPENF1_LIVE_TOKEN`: optional server-side live API token. With the default `Authorization` header, either `abc123` or `Bearer abc123` is accepted.
+- `INTERVAL_OPENF1_LIVE_AUTH_HEADER`: optional auth header name for the token, defaults to `Authorization`.
 - `RUST_LOG`: tracing filter, defaults to `interval_backend=info,tower_http=info`.
+
+With OpenF1 live enabled, the frontend checks `GET /api/live/current` on startup, polls quietly while no live session is active, and keeps warmup checks responsive while OpenF1 rows are starting to publish. The control bar exposes `OPEN LIVE` for a manual check/start. A race or sprint becomes active at its OpenF1 session start time; before that it is shown as the next live session so the app does not open live before timing/location rows exist. Once active, the backend starts an in-memory live session, polls OpenF1 channels on endpoint-specific cadences, and streams the same `ReplaySnapshot` shape used by historical replay. Reloading the app during a running backend live session reconnects through that in-memory session even if upstream discovery has a transient failure. Individual OpenF1 live HTTP requests are bounded by a request timeout so one slow endpoint cannot freeze live refresh indefinitely. `LIVE SIM` remains available as a deterministic test mode from cached historical sessions.
 
 Smoke script parameters:
 
@@ -92,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File scripts/check-static.ps1
 powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
 ```
 
-The static check parses the PowerShell scripts. The main verification script runs that static check, backend tests, frontend tests, and the frontend production build.
+The static check parses the PowerShell scripts. The main verification script runs that static check, backend tests, frontend tests, the frontend production build, and the OpenF1 live smoke gate against a local mock.
 The script checks for required local tools (`cargo` and `bun`) before running the gates.
 
 After a historical race has been ingested once into `interval.db`, run the full cached MVP verification. With no extra parameters this checks the seeded Bahrain target:
@@ -102,6 +108,29 @@ powershell -ExecutionPolicy Bypass -File scripts/verify.ps1 -WithSmoke
 ```
 
 The smoke step builds a fresh backend binary, rebuilds the requested replay artifacts from the cached raw historical bundle, starts the backend and Vite dev server, confirms the selected replay is cached, then checks replay metadata, meeting context, a mid-race snapshot with section quality labels and 3-lap derived metrics, invalid replay-cursor handling, track geometry, REST/proxied replay events, initial SSE stream events, metadata-driven stream cadence, and the Vite API proxy before shutting the local smoke processes down.
+
+Live mode is part of the default verification gate and does not require real OpenF1 credentials. It starts local OpenF1-compatible mock servers, points the backend at them, starts the backend and Vite proxy, then checks pre-session waiting, post-session reconnect clamping, warmup `503` retry behavior, required-channel `502` failure behavior, malformed refresh fallback with a synthetic failed `refresh` status channel, live discovery, start, metadata, mid-session snapshot sync, status, event feed, track geometry, typed SSE `metadata`/`snapshot`/`event` frames, the real-session diagnostic script, stop, and proxied live endpoints:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
+```
+
+For a quicker local loop, skip only the live smoke process gate:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/verify.ps1 -SkipLiveSmoke
+```
+
+Real OpenF1 live validation still needs an active race or sprint window. During a real session:
+
+1. Start the backend with OpenF1 live enabled, and set any required OpenF1 live auth variables if your deployment needs them.
+2. Run `powershell -ExecutionPolicy Bypass -File scripts/check-live-current.ps1 -Start -RequireActive -Strict` and confirm it reports `availability: active`, `active: true`, and the expected race or sprint session. Add `-ExpectedMeetingName "British Grand Prix" -ExpectedSessionType sprint` or `-ExpectedSessionType race` to fail fast on the wrong session. If you know the OpenF1 session key, add `-ExpectedSessionKey 12345` too.
+3. Open the app or press `OPEN LIVE`; the dashboard should switch to `LIVE · OpenF1` and connect without showing a stale historical replay.
+4. Verify the first snapshot reflects the current race state, not session start, with timing, map, weather, race-control, and stint panels all updating from one snapshot.
+5. Run `powershell -ExecutionPolicy Bypass -File scripts/check-live-current.ps1 -WatchSeconds 900 -Strict` to watch live status for 15 minutes and fail immediately on failed, stale, or missing critical channels, a stuck backend runtime, or an empty timing/map snapshot. Strict mode allows degradable channels such as intervals, pit, race-control, stints, weather, and session-result to be bad without failing when the core dashboard snapshot is healthy; override that with `-AllowedBadChannels @()` when investigating those feeds. Add `-MinGeometryPoints 20` once cached, historical, or accumulated live location geometry is expected. Add `-MinEvents 1` once race-control, pit, weather, or derived events are expected. Omit `-Strict` only when intentionally observing degraded upstream behavior.
+6. Reload the browser mid-session and confirm it reconnects near the current race state. If OpenF1 discovery is degraded but the backend live session is already running, `/api/live/current` should still report the active in-memory session. Then stop live mode and confirm the app returns cleanly to replay selection/playback.
+
+For terminal help on the live checker, run `Get-Help .\scripts\check-live-current.ps1 -Detailed`.
 
 To validate a second cached historical race, pass its OpenF1 `SessionKey`, `MeetingKey`, expected race name, and quality expectations, for example:
 
@@ -124,4 +153,4 @@ bun run build
 powershell -ExecutionPolicy Bypass -File scripts/smoke-mvp.ps1
 ```
 
-Current coverage includes replay determinism, OpenF1 normalization, cached rebuilds, Bahrain curated/projected map fallback, REST route contracts, replay query validation, replay event contracts, SSE route contracts and smoke coverage, static PowerShell script parsing, frontend formatters, playback helpers, session selection/readiness helpers, timing display and empty-state helpers, event-feed helpers, weather display helpers, stint timeline helpers, track geometry helpers, and track map view helpers.
+Current coverage includes replay determinism, OpenF1 normalization, cached rebuilds, Bahrain curated/projected map fallback, OpenF1 live discovery/start/snapshot/status/events/geometry/stream/stop behavior against mocks, mid-session live sync, typed live SSE event frames, REST route contracts, replay query validation, replay event contracts, SSE route contracts and smoke coverage, static PowerShell script parsing, frontend formatters, playback helpers, session selection/readiness helpers, live source/channel badges, timing display and empty-state helpers, event-feed helpers, weather display helpers, stint timeline helpers, track geometry helpers, and track map view helpers.

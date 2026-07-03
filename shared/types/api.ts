@@ -256,6 +256,42 @@ export interface ReplayEventListResponse {
   events: ReplayEvent[];
 }
 
+export interface LiveSessionStatus {
+  session_key: number;
+  active: boolean;
+  current_t?: number | null;
+  max_t?: number | null;
+  started_at?: string | null;
+  updated_at?: string | null;
+  source?: string | null;
+  channels: LiveChannelHealth[];
+}
+
+export type LiveSimulationStatus = LiveSessionStatus;
+
+export type LiveChannelState = "fresh" | "cached" | "stale" | "missing" | "failed";
+
+export interface LiveChannelHealth {
+  endpoint: string;
+  state: LiveChannelState;
+  age_seconds?: number | null;
+  rows?: number | null;
+  last_error?: string | null;
+}
+
+export interface LiveCurrentResponse {
+  availability: LiveAvailability;
+  active: boolean;
+  session?: Session | null;
+  meeting?: Meeting | null;
+  next_session?: Session | null;
+  next_meeting?: Meeting | null;
+  status?: LiveSessionStatus | null;
+  message?: string | null;
+}
+
+export type LiveAvailability = "disabled" | "inactive" | "active" | "error";
+
 export interface ReplayEvent {
   id: string;
   t: number;

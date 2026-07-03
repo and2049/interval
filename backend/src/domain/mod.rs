@@ -40,6 +40,65 @@ pub struct Session {
     pub total_laps: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LiveSessionStatus {
+    pub session_key: i64,
+    pub active: bool,
+    pub current_t: Option<f64>,
+    pub max_t: Option<f64>,
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    pub source: Option<String>,
+    #[serde(default)]
+    pub channels: Vec<LiveChannelHealth>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LiveChannelHealth {
+    pub endpoint: String,
+    pub state: LiveChannelState,
+    pub age_seconds: Option<f64>,
+    pub rows: Option<usize>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveChannelState {
+    Fresh,
+    Cached,
+    Stale,
+    Missing,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LiveCurrentResponse {
+    #[serde(default = "default_live_availability")]
+    pub availability: LiveAvailability,
+    pub active: bool,
+    pub session: Option<Session>,
+    pub meeting: Option<Meeting>,
+    pub next_session: Option<Session>,
+    pub next_meeting: Option<Meeting>,
+    pub status: Option<LiveSessionStatus>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveAvailability {
+    Disabled,
+    Inactive,
+    Active,
+    Error,
+}
+
+fn default_live_availability() -> LiveAvailability {
+    LiveAvailability::Inactive
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionType {

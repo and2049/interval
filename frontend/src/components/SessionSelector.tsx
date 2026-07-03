@@ -7,7 +7,7 @@ import {
   canStartSessionAction,
   ingestOutcome,
   ingestOutcomeClass,
-  isBusySessionAction,
+  isSessionActionDisabled,
   sessionActionLabel,
   sessionActionStatus,
   sessionIngestErrorMessage,
@@ -38,6 +38,10 @@ interface SessionSelectorProps {
   onOpenSession: (sessionKey: number) => void;
   onSessionIntent?: (sessionKey?: number) => void;
   onSelectionChange?: (selection: { sessionKey?: number; label?: string }) => void;
+  liveStatusMessage?: string;
+  liveChecking?: boolean;
+  liveActive?: boolean;
+  onCheckLive?: () => void;
 }
 
 export function SessionSelector(props: SessionSelectorProps) {
@@ -240,6 +244,7 @@ export function SessionSelector(props: SessionSelectorProps) {
       readiness: selectedReadiness()
     });
   const latestOutcome = () => ingestOutcome(lastIngest());
+  const selectorLocked = () => props.liveActive === true;
 
   return (
     <div
@@ -251,7 +256,7 @@ export function SessionSelector(props: SessionSelectorProps) {
         testId="season-select"
         value={selectedSeason()}
         options={seasonOptions(seasons())}
-        disabled={seasons.loading}
+        disabled={seasons.loading || selectorLocked()}
         onChange={chooseSeason}
       />
 
@@ -262,7 +267,7 @@ export function SessionSelector(props: SessionSelectorProps) {
         labelClass="ml-2 text-slate-500"
         value={selectedMeeting()}
         options={meetingOptions(meetings())}
-        disabled={meetings.loading}
+        disabled={meetings.loading || selectorLocked()}
         onChange={chooseMeeting}
       />
 
@@ -272,7 +277,7 @@ export function SessionSelector(props: SessionSelectorProps) {
         labelClass="ml-2 text-slate-500"
         value={selectedSession()}
         options={sessionOptions(sessions())}
-        disabled={sessions.loading}
+        disabled={sessions.loading || selectorLocked()}
         onChange={chooseSession}
       />
 
@@ -288,17 +293,32 @@ export function SessionSelector(props: SessionSelectorProps) {
         class="ml-2 border border-mint bg-mint/10 px-3 py-1 font-semibold text-mint disabled:border-line disabled:text-slate-500"
         data-testid="session-open"
         disabled={
-          selectedSession() == null ||
-          !canStartSessionAction(selectedReadiness()) ||
-          isBusySessionAction(ingestState())
+          isSessionActionDisabled({
+            selectedSession: selectedSession(),
+            readiness: selectedReadiness(),
+            ingestState: ingestState(),
+            liveActive: props.liveActive
+          })
         }
         onClick={() => void openSelected("manual")}
       >
         {actionLabel()}
       </button>
 
+      <button
+        class="border border-line bg-panel px-3 py-1 font-semibold text-slate-300 hover:border-mint hover:text-mint disabled:text-slate-600"
+        data-testid="live-check"
+        disabled={props.liveChecking || props.liveActive}
+        onClick={() => props.onCheckLive?.()}
+      >
+        {props.liveActive ? "LIVE OPEN" : props.liveChecking ? "CHECKING LIVE" : "OPEN LIVE"}
+      </button>
+
       <Show when={sessionActionStatus(ingestState())}>
         {(message) => <span class="text-amber">{message()}</span>}
+      </Show>
+      <Show when={props.liveActive}>
+        <span class="text-mint">Live race owns the dashboard.</span>
       </Show>
       <Show when={ingestState() === "failed"}>
         <span class="text-danger">
@@ -323,6 +343,9 @@ export function SessionSelector(props: SessionSelectorProps) {
       </Show>
       <Show when={meetings.error || sessions.error}>
         <span class="text-danger">OpenF1 discovery failed.</span>
+      </Show>
+      <Show when={props.liveStatusMessage}>
+        {(message) => <span class="text-slate-400">{message()}</span>}
       </Show>
     </div>
   );

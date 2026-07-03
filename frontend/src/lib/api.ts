@@ -1,5 +1,8 @@
 import type {
   IngestStatus,
+  LiveCurrentResponse,
+  LiveSessionStatus,
+  LiveSimulationStatus,
   Meeting,
   IngestResponse,
   ReplayMetadata,
@@ -135,5 +138,62 @@ export const api = {
   trackGeometry: (sessionKey: number) =>
     json<TrackGeometry>(
       `/api/sessions/${positiveInteger(sessionKey, "session key")}/track/geometry`
+    ),
+  liveCurrent: () => json<LiveCurrentResponse>("/api/live/current"),
+  liveStart: (sessionKey: number) =>
+    postJson<LiveSessionStatus>(
+      `/api/sessions/${positiveInteger(sessionKey, "session key")}/live/start`
+    ),
+  liveStatus: (sessionKey: number) =>
+    json<LiveSessionStatus>(
+      `/api/sessions/${positiveInteger(sessionKey, "session key")}/live/status`
+    ),
+  liveMetadata: (sessionKey: number) =>
+    json<ReplayMetadata>(
+      `/api/sessions/${positiveInteger(sessionKey, "session key")}/live/metadata`
+    ),
+  liveSnapshot: (sessionKey: number) =>
+    json<ReplaySnapshot>(
+      `/api/sessions/${positiveInteger(sessionKey, "session key")}/live/snapshot`
+    ),
+  liveStreamUrl: (sessionKey: number) =>
+    `/api/sessions/${positiveInteger(sessionKey, "session key")}/live/stream`,
+  liveEvents: (sessionKey: number) =>
+    json<ReplayEventListResponse>(
+      `/api/sessions/${positiveInteger(sessionKey, "session key")}/live/events`
+    ),
+  liveTrackGeometry: (sessionKey: number) =>
+    json<TrackGeometry>(
+      `/api/sessions/${positiveInteger(sessionKey, "session key")}/live/track/geometry`
+    ),
+  liveStop: (sessionKey: number) =>
+    postJson<LiveSessionStatus>(
+      `/api/sessions/${positiveInteger(sessionKey, "session key")}/live/stop`
+    ),
+  liveSimulationStart: (sessionKey: number) =>
+    postJson<LiveSimulationStatus>(
+      `/api/sessions/${positiveInteger(sessionKey, "session key")}/live-simulation/start`
+    ),
+  liveSimulationStatus: (sessionKey: number) =>
+    json<LiveSimulationStatus>(
+      `/api/sessions/${positiveInteger(sessionKey, "session key")}/live-simulation/status`
+    ),
+  liveSimulationSnapshot: (sessionKey: number) =>
+    json<ReplaySnapshot>(
+      `/api/sessions/${positiveInteger(sessionKey, "session key")}/live-simulation/snapshot`
+    ),
+  liveSimulationStreamUrl: (sessionKey: number) =>
+    `/api/sessions/${positiveInteger(sessionKey, "session key")}/live-simulation/stream`,
+  liveSimulationStop: (sessionKey: number) =>
+    postJson<LiveSimulationStatus>(
+      `/api/sessions/${positiveInteger(sessionKey, "session key")}/live-simulation/stop`
     )
 };
+
+async function postJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await apiErrorMessage(response));
+  }
+  return response.json() as Promise<T>;
+}

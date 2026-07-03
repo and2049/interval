@@ -64,7 +64,8 @@ pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
 fn event_source(source: crate::normalization::RaceDataSource) -> EventSource {
     match source {
         crate::normalization::RaceDataSource::FastF1Historical => EventSource::FastF1,
-        crate::normalization::RaceDataSource::OpenF1Historical => EventSource::OpenF1,
+        crate::normalization::RaceDataSource::OpenF1Historical
+        | crate::normalization::RaceDataSource::OpenF1Live => EventSource::OpenF1,
         crate::normalization::RaceDataSource::Demo => EventSource::System,
     }
 }

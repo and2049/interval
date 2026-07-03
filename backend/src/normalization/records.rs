@@ -19,6 +19,7 @@ pub struct RaceData {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RaceDataSource {
     OpenF1Historical,
+    OpenF1Live,
     FastF1Historical,
     Demo,
 }

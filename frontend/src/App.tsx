@@ -10,7 +10,7 @@ import { createReplayStore } from "./stores/replay";
 
 export default function App() {
   const replay = createReplayStore();
-  const metadata = () => replay.activeMetadata();
+  const metadata = () => replay.displayMetadata();
   const snapshot = () => replay.activeSnapshot();
   const [selectedSessionLabel, setSelectedSessionLabel] = createSignal<string>();
 
@@ -22,6 +22,10 @@ export default function App() {
         onOpenSession={replay.openSession}
         onSessionIntent={replay.clearActiveSession}
         onSelectionChange={(selection) => setSelectedSessionLabel(selection.label)}
+        liveStatusMessage={replay.liveAvailabilityMessage()}
+        liveChecking={replay.liveAvailabilityChecking()}
+        liveActive={replay.liveActive()}
+        onCheckLive={replay.checkLive}
       />
       <Show
         when={metadata() && snapshot()}
@@ -35,7 +39,8 @@ export default function App() {
                 snapshotLoading: replay.snapshot.loading,
                 snapshotError: replay.snapshot.error,
                 sessionKey: replay.sessionKey(),
-                selectedSessionLabel: selectedSessionLabel()
+                selectedSessionLabel: selectedSessionLabel(),
+                liveStatusMessage: replay.liveAvailabilityMessage()
               })}
             </div>
           </div>
@@ -46,9 +51,19 @@ export default function App() {
           t={replay.time()}
           playing={replay.playing()}
           speed={replay.speed()}
+          liveSimulationActive={replay.liveSimulationActive()}
+          liveSimulationStatus={replay.liveSimulationConnection()}
+          liveActive={replay.liveActive()}
+          liveStatus={replay.liveConnection()}
+          liveRuntimeStatus={replay.liveStatus()}
+          liveChecking={replay.liveAvailabilityChecking()}
+          liveChannels={replay.liveChannels()}
           onPlayPause={() => replay.setPlaying((value) => !value)}
           onSeek={replay.seek}
           onSpeed={replay.setSpeed}
+          onLiveCheck={replay.checkLive}
+          onLiveStop={() => void replay.stopLive()}
+          onLiveSimulationToggle={() => void replay.toggleLiveSimulation()}
         />
 
         <div class="grid h-[calc(100vh-105px)] grid-cols-[minmax(31rem,38rem)_minmax(26rem,1fr)_minmax(18rem,21rem)] grid-rows-[1fr_13rem] gap-2 p-2">
@@ -58,7 +73,7 @@ export default function App() {
             geometry={replay.activeGeometry()}
             geometryError={replay.activeGeometryError()}
             frameStepSeconds={metadata()!.frame_step_seconds}
-            playing={replay.playing()}
+            playing={replay.playing() || replay.liveActive() || replay.liveSimulationActive()}
             speed={replay.speed()}
           />
           <SidePanels

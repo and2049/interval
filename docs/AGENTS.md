@@ -2,18 +2,19 @@
 
 ## Project identity
 
-This repository contains an interactive Formula 1 second-screen dashboard focused on replay-first race analysis, with a future path to live-session support. The product is inspired by engineer-style timing displays, but the intended audience is fans who want faster race understanding while watching a broadcast or replay.[cite:6][cite:20]
+This repository contains an interactive Formula 1 second-screen dashboard focused on replay-first race analysis and live race support. The product is inspired by engineer-style timing displays, but the intended audience is fans who want faster race understanding while watching a broadcast or replay.[cite:6][cite:20]
 
-The architecture must assume two eventual data modes:
+The architecture currently supports three data modes:
 
-- Historical replay mode using OpenF1 historical data, available without authentication.[cite:6]
-- Future live mode using OpenF1 sponsor-tier live access during active session windows.[cite:6][cite:20]
+- Historical replay mode using OpenF1 discovery plus FastF1 historical telemetry extraction.
+- Live simulation mode sourced from cached historical replay data.
+- OpenF1 live mode during active race/sprint session windows, enabled by default and disabled only by server-side configuration.[cite:6][cite:20]
 
 ## Primary goals
 
 1. Build a polished, lightweight, data-dense web application.
-2. Keep replay mode as the first fully working product.
-3. Preserve a clean path for future live-mode support.
+2. Keep replay mode deterministic and fully working.
+3. Make live mode use the same normalized dashboard model instead of a separate UI path.
 4. Produce a portfolio-quality codebase with strong engineering structure.
 5. Favor clarity, speed, and maintainability over premature complexity.
 
@@ -23,14 +24,14 @@ The architecture must assume two eventual data modes:
 - **Frontend:** SolidJS.
 - **Styling:** Tailwind CSS.
 - **App shape:** Web app, not Electron by default.
-- **Delivery model:** Replay-first, live-ready.
+- **Delivery model:** Replay-first, live-capable.
 
 ## Product principles
 
 - The app is a **race engineer dashboard for fans**.
 - The UI should optimize for scan speed, not novelty.
 - Information density is good when grouped clearly.
-- The most important UX concept is a single synchronized replay cursor.
+- The most important UX concept is a single synchronized snapshot cursor.
 - Tables, timelines, and track context matter more than decorative charts.
 - Use visual emphasis sparingly and intentionally.
 
@@ -106,29 +107,28 @@ Avoid passing raw upstream payloads directly into UI components when a normalize
 
 - Treat OpenF1 as an upstream source, not as the app's internal model.[cite:6]
 - Normalize upstream payloads before exposing them to the rest of the system.
-- Keep replay ingestion and future live ingestion behind connector boundaries.
+- Keep replay ingestion and live ingestion behind connector boundaries.
 - Do not hardwire UI components to the exact shape of upstream responses.
-- Assume live access may require sponsor-tier credentials and dedicated transport handling.[cite:20][cite:6]
+- Assume live access may require sponsor-tier credentials and keep those credentials server-side.[cite:20][cite:6]
 
-## Replay-first rules
+## Replay/live contract rules
 
-Replay mode is the source of truth for early development.
+Historical replay remains the deterministic validation path. Live mode should use
+the same backend-owned snapshot/event model, not a separate UI model.
 
-- Every core feature should work against historical data first.[cite:6]
+- Every dashboard panel should work against historical replay data and live snapshots.[cite:6]
 - Replay state must be deterministic.
-- Timeline seek and playback speed changes must be first-class features.
-- Dashboard panels should derive their displayed state from the replay cursor.
-- Avoid writing live-only code paths until a stable replay model exists.
+- Timeline seek and playback speed changes must be first-class features for historical mode.
+- Dashboard panels should derive their displayed state from the current `ReplaySnapshot`.
+- Avoid live-only frontend panel logic; put source-specific behavior behind backend connectors.
 
-## Live-ready rules
+## Live-mode rules
 
-When live mode is added later:
-
-- The replay engine and live engine should feed the same normalized event model.
-- Live updates should be incremental and event-driven.
+- Replay, live simulation, and OpenF1 live should feed the same normalized event model.
+- Live updates should be incremental and stream backend-owned snapshots/events.
 - Credentials must remain server-side.
 - The frontend should subscribe to internal backend streams, not directly to paid upstream services.
-- Add live support without forcing a redesign of existing components.
+- Add live improvements without forcing a redesign of existing dashboard panels.
 
 ## Backend guidance
 
@@ -182,7 +182,7 @@ The backend should not become a dumping ground for unscoped experiments. New fea
 
 When deciding what to build next, prefer features in this order:
 
-1. Core replay correctness.
+1. Core replay/live correctness.
 2. Timing and stint clarity.
 3. Race-context panels such as messages, weather, and track status.[cite:6]
 4. Derived insights that improve understanding.
@@ -236,7 +236,7 @@ Keep docs concise but specific. Prefer real examples over vague guidance.
 When making design or implementation decisions, follow this order:
 
 1. Preserve replay-first simplicity.
-2. Keep the architecture live-ready.
+2. Keep replay, live simulation, and OpenF1 live on one dashboard contract.
 3. Favor normalized domain models.
 4. Prefer lightweight UI patterns.
 5. Avoid unnecessary dependencies.
@@ -246,9 +246,10 @@ When making design or implementation decisions, follow this order:
 
 These items still need explicit product decisions:
 
-- Which session types are in MVP: race only, or race plus qualifying and practice?
+- Whether qualifying and practice should join the current race-plus-sprint scope.
 - What should the default dashboard density be?
 - How much charting is desirable in the first release versus table-first views?
 - What persistence layer should be used in local development and in production?
 - What deployment target should be assumed for the first public demo?
 - Should there eventually be an advanced TUI companion, or should the web app remain the sole official client?
+- What is the right production deployment model for OpenF1 live credentials and long-running SSE sessions?

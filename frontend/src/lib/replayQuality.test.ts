@@ -1,6 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { ReplayMetadata } from "../../../shared/types/api";
-import { badgeClass, channelBadges, mapModeClass, mapModeLabel, qualityBadge } from "./replayQuality";
+import {
+  badgeClass,
+  channelBadges,
+  liveChannelBadges,
+  liveDashboardBadges,
+  liveStatusLabel,
+  mapModeClass,
+  mapModeLabel,
+  qualityBadge
+} from "./replayQuality";
 
 describe("mapModeLabel", () => {
   test("labels map modes for compact UI badges", () => {
@@ -63,6 +72,32 @@ describe("channelBadges", () => {
     expect(badges[0]).toMatchObject({ label: "FastF1 · 5 Hz", tone: "ready" });
     expect(badges[1]).toMatchObject({ label: "DEGRADED", tone: "degraded" });
   });
+
+  test("labels live simulation as a ready live-like source", () => {
+    const badges = channelBadges(
+      metadata({
+        source: "fast_f1_telemetry",
+        trackReady: true,
+        dataSource: "live_simulation",
+        frameStepSeconds: 0.2
+      })
+    );
+
+    expect(badges[0]).toMatchObject({ label: "Live Sim · 5 Hz", tone: "ready" });
+  });
+
+  test("labels OpenF1 live as a ready live source", () => {
+    const badges = channelBadges(
+      metadata({
+        source: "open_f1_location",
+        trackReady: true,
+        dataSource: "openf1_live",
+        frameStepSeconds: 0.5
+      })
+    );
+
+    expect(badges[0]).toMatchObject({ label: "LIVE · OpenF1 · 2 Hz", tone: "ready" });
+  });
 });
 
 describe("qualityBadge", () => {
@@ -78,6 +113,72 @@ describe("qualityBadge", () => {
       ready: false,
       tone: "missing"
     });
+  });
+});
+
+describe("liveChannelBadges", () => {
+  test("maps live endpoint health to compact badge tones", () => {
+    const badges = liveChannelBadges([
+      { endpoint: "location", state: "fresh", age_seconds: 0.2, rows: 20, last_error: null },
+      { endpoint: "weather", state: "cached", age_seconds: 5, rows: 1, last_error: null },
+      { endpoint: "pit", state: "cached", age_seconds: 5, rows: 1, last_error: "timeout" },
+      { endpoint: "drivers", state: "fresh", age_seconds: -1, rows: 20, last_error: null },
+      { endpoint: "pit", state: "fresh", age_seconds: 0.1, rows: 0, last_error: null },
+      { endpoint: "intervals", state: "stale", age_seconds: 12, rows: 20, last_error: null },
+      { endpoint: "race_control", state: "missing", age_seconds: 1, rows: 0, last_error: null }
+    ]);
+
+    expect(badges).toEqual([
+      { label: "LOCATION", ready: true, tone: "ready", title: "location: fresh · 20 rows · 0s old" },
+      { label: "WEATHER", ready: true, tone: "ready", title: "weather: cached · 1 rows · 5s old" },
+      { label: "PIT", ready: true, tone: "degraded", title: "pit: cached · 1 rows · 5s old · timeout" },
+      { label: "DRIVERS", ready: true, tone: "ready", title: "drivers: fresh · 20 rows · 0s old" },
+      { label: "PIT", ready: true, tone: "ready", title: "pit: fresh · 0 rows · 0s old" },
+      { label: "INTERVALS", ready: false, tone: "degraded", title: "intervals: stale · 20 rows · 12s old" },
+      { label: "RACE_CONTROL", ready: false, tone: "missing", title: "race_control: missing · 0 rows · 1s old" }
+    ]);
+  });
+});
+
+describe("liveDashboardBadges", () => {
+  test("keeps the live source and cadence badge before endpoint health", () => {
+    const badges = liveDashboardBadges(
+      metadata({
+        source: "open_f1_location",
+        trackReady: true,
+        dataSource: "openf1_live",
+        frameStepSeconds: 0.5
+      }),
+      [{ endpoint: "location", state: "fresh", age_seconds: 0.2, rows: 20, last_error: null }]
+    );
+
+    expect(badges[0]).toMatchObject({ label: "LIVE · OpenF1 · 2 Hz", tone: "ready" });
+    expect(badges[1]).toMatchObject({ label: "LOCATION", tone: "ready" });
+  });
+});
+
+describe("liveStatusLabel", () => {
+  test("includes latest backend update age when available", () => {
+    expect(
+      liveStatusLabel(
+        "connected",
+        {
+          session_key: 88_001,
+          active: true,
+          current_t: 10,
+          max_t: 100,
+          started_at: "2026-06-28T20:00:00.000Z",
+          updated_at: "2026-06-28T20:00:03.000Z",
+          source: "openf1_live",
+          channels: []
+        },
+        Date.parse("2026-06-28T20:00:04.200Z")
+      )
+    ).toBe("LIVE connected · UPDATED 1s");
+  });
+
+  test("falls back to connection state when update timestamp is missing", () => {
+    expect(liveStatusLabel("reconnecting")).toBe("LIVE reconnecting");
   });
 });
 
