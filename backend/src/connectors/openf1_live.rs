@@ -291,3 +291,452 @@ impl Default for OpenF1LiveClient {
     }
 }
 
+impl OpenF1LiveClient {
+    pub fn from_env() -> Self {
+        let enabled =
+            live_enabled_from_env_value(std::env::var("INTERVAL_OPENF1_LIVE_ENABLED").ok());
+        let configured_base_url = std::env::var("INTERVAL_OPENF1_LIVE_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let (base_url, config_error) = live_base_url_from_env_value(configured_base_url);
+        // A login saved through the settings UI takes precedence over the environment.
+        let (auth, _source) = crate::settings::resolve_openf1_auth(
+            &crate::settings::SettingsStore::default_location().load(),
+            std::env::var("INTERVAL_OPENF1_LIVE_TOKEN").ok(),
+        );
+        let auth_header = std::env::var("INTERVAL_OPENF1_LIVE_AUTH_HEADER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| AUTHORIZATION.as_str().to_string());
+
+        Self {
+            http: live_http_client(),
+            config: Arc::new(RwLock::new(OpenF1LiveConfig {
+                enabled,
+                base_url,
+                auth,
+                auth_header,
+            })),
+            config_error,
+            request_limiter: Arc::new(Mutex::new(LiveRequestLimiter::default())),
+            schedule_cache: Arc::new(Mutex::new(None)),
+            issued_token: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn with_config(config: OpenF1LiveConfig) -> Self {
+        let mut config = config;
+        config.base_url = with_trailing_slash(config.base_url);
+        Self {
+            http: live_http_client(),
+            config: Arc::new(RwLock::new(config)),
+            config_error: None,
+            request_limiter: Arc::new(Mutex::new(LiveRequestLimiter::default())),
+            schedule_cache: Arc::new(Mutex::new(None)),
+            issued_token: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_config_error(config: OpenF1LiveConfig, error: impl Into<String>) -> Self {
+        Self {
+            http: live_http_client(),
+            config: Arc::new(RwLock::new(config)),
+            config_error: Some(error.into()),
+            request_limiter: Arc::new(Mutex::new(LiveRequestLimiter::default())),
+            schedule_cache: Arc::new(Mutex::new(None)),
+            issued_token: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.config().enabled
+    }
+
+    /// Snapshot of the current config. Clones so no guard is ever held across an await.
+    fn config(&self) -> OpenF1LiveConfig {
+        self.config
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Applies new OpenF1 credentials to this client and every clone of it.
+    ///
+    /// Clearing the caches is not optional. The schedule is served for up to 60 seconds,
+    /// so without this a user who fixes a bad login keeps seeing the same failure and
+    /// concludes the fix did not work; and a token issued for the previous login must
+    /// not outlive it.
+    pub async fn set_auth(&self, auth: OpenF1Auth) {
+        self.config
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .auth = auth;
+        *self.issued_token.lock().await = None;
+        *self.schedule_cache.lock().await = None;
+    }
+
+    /// One cheap authenticated request, for the settings panel's connection test.
+    ///
+    /// `session_key=latest` returns a single row, unlike the schedule fetch which pulls
+    /// a whole year. With a login configured this also exercises the token exchange, so
+    /// a wrong password surfaces here as `Unauthorized`. Deliberately ignores `enabled`:
+    /// "does this login work" is a useful question even when live discovery is off.
+    pub async fn probe(&self) -> Result<(), OpenF1LiveError> {
+        self.ensure_valid_config()?;
+        self.fetch_endpoint(
+            "sessions",
+            &[("session_key".to_string(), "latest".to_string())],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub fn endpoint_specs(&self) -> Vec<LiveEndpointSpec> {
+        LIVE_ENDPOINTS
+            .iter()
+            .map(|spec| {
+                if cfg!(test) {
+                    LiveEndpointSpec {
+                        cadence_ms: (spec.cadence_ms as f64 * TEST_CADENCE_SCALE) as i64,
+                        ..*spec
+                    }
+                } else {
+                    *spec
+                }
+            })
+            .collect()
+    }
+
+    pub async fn current_session(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ActiveLiveSession>, OpenF1LiveError> {
+        Ok(self.current_and_next_session(now).await?.current)
+    }
+
+    pub async fn next_session(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ActiveLiveSession>, OpenF1LiveError> {
+        Ok(self.current_and_next_session(now).await?.next)
+    }
+
+    pub async fn current_and_next_session(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<LiveSessionDiscovery, OpenF1LiveError> {
+        if !self.enabled() {
+            return Ok(LiveSessionDiscovery {
+                current: None,
+                next: None,
+            });
+        }
+        self.ensure_valid_config()?;
+        let (sessions, meetings) = self.cached_schedule(now).await?;
+
+        Ok(LiveSessionDiscovery {
+            current: current_live_session_from_schedule(&sessions, &meetings, now),
+            next: next_live_session_from_schedule(&sessions, &meetings, now),
+        })
+    }
+
+    /// Season schedules change rarely; caching them keeps `current()` polls
+    /// from re-fetching the full year of meetings and sessions every time.
+    async fn cached_schedule(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<(Vec<Session>, Vec<Meeting>), OpenF1LiveError> {
+        {
+            let cache = self.schedule_cache.lock().await;
+            if let Some(entry) = cache.as_ref() {
+                if entry.fetched_at.elapsed() < Duration::from_secs(SCHEDULE_CACHE_SECONDS) {
+                    return Ok((entry.sessions.clone(), entry.meetings.clone()));
+                }
+            }
+        }
+
+        let (sessions, meetings) = self.fetch_schedule(now).await?;
+        *self.schedule_cache.lock().await = Some(ScheduleCacheEntry {
+            fetched_at: Instant::now(),
+            sessions: sessions.clone(),
+            meetings: meetings.clone(),
+        });
+        Ok((sessions, meetings))
+    }
+
+    async fn fetch_schedule(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<(Vec<Session>, Vec<Meeting>), OpenF1LiveError> {
+        let year = now.year();
+        let meetings_payload = self
+            .fetch_endpoint("meetings", &[("year".to_string(), year.to_string())])
+            .await?;
+        let mut meetings = normalization::meetings_from_openf1(meetings_payload)?;
+        let sessions_payload = self
+            .fetch_endpoint("sessions", &[("year".to_string(), year.to_string())])
+            .await?;
+        let mut sessions = normalization::race_sessions_from_openf1(sessions_payload)?;
+
+        if next_live_session_from_schedule(&sessions, &meetings, now).is_none()
+            && chrono::Datelike::month(&now) >= 11
+        {
+            let next_year = year + 1;
+            let next_meetings = self
+                .fetch_endpoint("meetings", &[("year".to_string(), next_year.to_string())])
+                .await;
+            let next_sessions = self
+                .fetch_endpoint("sessions", &[("year".to_string(), next_year.to_string())])
+                .await;
+            if let (Ok(meetings_payload), Ok(sessions_payload)) = (next_meetings, next_sessions) {
+                meetings.extend(normalization::meetings_from_openf1(meetings_payload)?);
+                sessions.extend(normalization::race_sessions_from_openf1(sessions_payload)?);
+            }
+        }
+
+        Ok((sessions, meetings))
+    }
+
+    pub async fn fetch_live_bundle(
+        &self,
+        session_key: i64,
+    ) -> Result<Vec<RawEndpoint>, OpenF1LiveError> {
+        if !self.enabled() {
+            return Err(OpenF1LiveError::Disabled);
+        }
+        self.ensure_valid_config()?;
+
+        let mut out = Vec::with_capacity(LIVE_ENDPOINTS.len());
+        let now = Utc::now();
+        for spec in LIVE_ENDPOINTS {
+            let payload = self
+                .fetch_endpoint(
+                    spec.name,
+                    &live_endpoint_params(session_key, spec.name, spec.initial_since(now)),
+                )
+                .await
+                .unwrap_or_else(|_| Value::Array(vec![]));
+            out.push(RawEndpoint {
+                endpoint: spec.name.to_string(),
+                session_key,
+                payload,
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn fetch_live_bundle_endpoint(
+        &self,
+        session_key: i64,
+        endpoint: &str,
+    ) -> Result<RawEndpoint, OpenF1LiveError> {
+        if !self.enabled() {
+            return Err(OpenF1LiveError::Disabled);
+        }
+        self.ensure_valid_config()?;
+        let payload = self
+            .fetch_endpoint(
+                endpoint,
+                &[("session_key".to_string(), session_key.to_string())],
+            )
+            .await?;
+        Ok(RawEndpoint {
+            endpoint: endpoint.to_string(),
+            session_key,
+            payload,
+        })
+    }
+
+    /// The first fetch of a feed for a session: the whole session, or the trailing
+    /// window the spec asks for.
+    pub async fn fetch_initial_live_bundle_endpoint(
+        &self,
+        session_key: i64,
+        spec: &LiveEndpointSpec,
+    ) -> Result<RawEndpoint, OpenF1LiveError> {
+        match spec.initial_since(Utc::now()) {
+            Some(since) => {
+                self.fetch_live_bundle_endpoint_since(session_key, spec.name, since)
+                    .await
+            }
+            None => self.fetch_live_bundle_endpoint(session_key, spec.name).await,
+        }
+    }
+
+    pub async fn fetch_live_bundle_endpoint_since(
+        &self,
+        session_key: i64,
+        endpoint: &str,
+        since: DateTime<Utc>,
+    ) -> Result<RawEndpoint, OpenF1LiveError> {
+        if !self.enabled() {
+            return Err(OpenF1LiveError::Disabled);
+        }
+        self.ensure_valid_config()?;
+        let params = live_endpoint_params(session_key, endpoint, Some(since));
+        let payload = self.fetch_endpoint(endpoint, &params).await?;
+        Ok(RawEndpoint {
+            endpoint: endpoint.to_string(),
+            session_key,
+            payload,
+        })
+    }
+
+    async fn fetch_endpoint(
+        &self,
+        endpoint: &str,
+        params: &[(String, String)],
+    ) -> Result<Value, OpenF1LiveError> {
+        let config = self.config();
+        let url = live_endpoint_url(&config.base_url, endpoint, params)?;
+
+        let mut retried = false;
+        loop {
+            let bearer = self.bearer_token(&config).await?;
+            self.request_limiter.lock().await.wait_turn().await;
+            let response = self
+                .http
+                .get(url.clone())
+                .headers(auth_headers(&config, bearer.as_ref())?)
+                .send()
+                .await?;
+            // Separate rejected credentials from an unreachable API. Without this both
+            // collapse into a transport error and the UI cannot tell a bad login from
+            // OpenF1 being down.
+            let status = response.status();
+            if is_auth_rejection(status) {
+                // A cached token can be revoked, or expire early if OpenF1's clock and
+                // ours disagree. Exchange the login once more and retry once; a second
+                // rejection is a real one.
+                if !retried && bearer.as_ref().is_some_and(|bearer| bearer.reused) {
+                    *self.issued_token.lock().await = None;
+                    retried = true;
+                    continue;
+                }
+                return Err(OpenF1LiveError::Unauthorized(status.as_u16()));
+            }
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                // The minute's budget is spent. Stand every poller down rather than let
+                // each of them discover the same thing and burn the next budget too.
+                let pause = retry_after(response.headers())
+                    .unwrap_or(OPENF1_LIVE_DEFAULT_RATE_LIMIT_PAUSE);
+                self.request_limiter
+                    .lock()
+                    .await
+                    .pause_until(Instant::now() + pause);
+                return Err(OpenF1LiveError::RateLimited {
+                    endpoint: endpoint.to_string(),
+                    pause_seconds: pause.as_secs(),
+                });
+            }
+            if status == reqwest::StatusCode::NOT_FOUND {
+                // OpenF1 answers an empty result set with 404 rather than `[]`: a
+                // `date>=` filter past the newest row, or `session_result` before the
+                // session ends. Any other 404 is a wrong path and stays an error.
+                let body = response.text().await.unwrap_or_default();
+                if is_no_results_body(&body) {
+                    return Ok(Value::Array(vec![]));
+                }
+                return Err(OpenF1LiveError::Status {
+                    endpoint: endpoint.to_string(),
+                    status: status.as_u16(),
+                    body: body.chars().take(200).collect(),
+                });
+            }
+            let response = response.error_for_status()?;
+            let payload = response.json::<Value>().await?;
+            if !payload.is_array() {
+                return Err(OpenF1LiveError::Normalize(anyhow::anyhow!(
+                    "OpenF1 {endpoint} returned a non-array payload"
+                )));
+            }
+            return Ok(payload);
+        }
+    }
+
+    /// The bearer value for the next request, exchanging the login for a fresh token
+    /// when there is no usable one. Holds the token lock across the exchange so
+    /// concurrent pollers wait for one exchange instead of each starting their own.
+    async fn bearer_token(
+        &self,
+        config: &OpenF1LiveConfig,
+    ) -> Result<Option<BearerToken>, OpenF1LiveError> {
+        match &config.auth {
+            OpenF1Auth::None => Ok(None),
+            OpenF1Auth::Token(token) => Ok(Some(BearerToken {
+                value: token.clone(),
+                reused: false,
+            })),
+            OpenF1Auth::Login(login) => {
+                let mut issued = self.issued_token.lock().await;
+                if let Some(token) = issued
+                    .as_ref()
+                    .filter(|token| Instant::now() < token.expires_at)
+                {
+                    return Ok(Some(BearerToken {
+                        value: token.access_token.clone(),
+                        reused: true,
+                    }));
+                }
+                let token = self.exchange_login(config, login).await?;
+                let value = token.access_token.clone();
+                *issued = Some(token);
+                Ok(Some(BearerToken {
+                    value,
+                    reused: false,
+                }))
+            }
+        }
+    }
+
+    /// `POST /token` with the login as a form body, per <https://openf1.org/auth.html>.
+    async fn exchange_login(
+        &self,
+        config: &OpenF1LiveConfig,
+        login: &OpenF1Login,
+    ) -> Result<IssuedToken, OpenF1LiveError> {
+        let url = token_url(&config.base_url)?;
+        self.request_limiter.lock().await.wait_turn().await;
+        let response = self
+            .http
+            .post(url)
+            .form(&[
+                ("username", login.username.as_str()),
+                ("password", login.password.as_str()),
+            ])
+            .send()
+            .await?;
+        let status = response.status();
+        // FastAPI-style servers answer a wrong password with 401 and a malformed login
+        // with 400 or 422; every one of them means "this login does not work".
+        if is_auth_rejection(status)
+            || status == reqwest::StatusCode::BAD_REQUEST
+            || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        {
+            return Err(OpenF1LiveError::Unauthorized(status.as_u16()));
+        }
+        let response = response.error_for_status()?;
+        let payload = response
+            .json::<TokenResponse>()
+            .await
+            .map_err(|error| OpenF1LiveError::TokenResponse(error.to_string()))?;
+        if payload.access_token.trim().is_empty() {
+            return Err(OpenF1LiveError::TokenResponse(
+                "empty access_token".to_string(),
+            ));
+        }
+        Ok(IssuedToken {
+            access_token: payload.access_token,
+            expires_at: Instant::now() + token_lifetime(payload.expires_in),
+        })
+    }
+
+    fn ensure_valid_config(&self) -> Result<(), OpenF1LiveError> {
+        if let Some(error) = &self.config_error {
+            return Err(OpenF1LiveError::Config(error.clone()));
+        }
+        Ok(())
+    }
+}
+
