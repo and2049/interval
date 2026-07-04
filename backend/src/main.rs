@@ -4,6 +4,8 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    interval_backend::env::load_dotenv();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")

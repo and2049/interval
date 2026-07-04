@@ -23,6 +23,7 @@ export default function App() {
         onSessionIntent={replay.clearActiveSession}
         onSelectionChange={(selection) => setSelectedSessionLabel(selection.label)}
         liveStatusMessage={replay.liveAvailabilityMessage()}
+        liveAvailability={replay.liveAvailability()}
         liveChecking={replay.liveAvailabilityChecking()}
         liveActive={replay.liveActive()}
         onCheckLive={replay.checkLive}

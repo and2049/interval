@@ -38,8 +38,13 @@ if (Test-Path -LiteralPath $liveCheckScript) {
             -or -not $help.Contains("-WatchSeconds 900 -Strict") `
             -or -not $help.Contains("-ExpectedMeetingName") `
             -or -not $help.Contains("-ExpectedSessionType") `
+            -or -not $help.Contains("-ExpectedNextMeetingName") `
+            -or -not $help.Contains("-ExpectedNextSessionType") `
             -or -not $help.Contains("-AllowedBadChannels") `
-            -or -not $help.Contains("-MinEvents 1")
+            -or -not $help.Contains("-MinEvents 1") `
+            -or -not $help.Contains("-MinGeometryPoints 20") `
+            -or -not $help.Contains("-MaxSnapshotClockLagSeconds") `
+            -or -not $help.Contains("-WaitForActiveSeconds")
     ) {
         throw "check-live-current.ps1 help must document strict live validation"
     }
@@ -54,7 +59,9 @@ $docsToCheck = @(
 $forbiddenLivePhrases = @(
     "live mode is deferred",
     "future live data",
-    "experimental feature"
+    "experimental feature",
+    "replay-first",
+    "live-capable"
 )
 foreach ($phrase in $forbiddenLivePhrases) {
     $matches = $docsToCheck | Select-String -Pattern $phrase -SimpleMatch -ErrorAction SilentlyContinue

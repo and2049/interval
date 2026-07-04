@@ -1,5 +1,6 @@
 import type {
   DataQuality,
+  LiveAvailability,
   LiveChannelHealth,
   LiveSessionStatus,
   MapMode,
@@ -64,6 +65,25 @@ export function liveStatusLabel(
 
   const ageSeconds = Math.max(0, Math.round((nowMs - updatedAt) / 1000));
   return `LIVE ${state} · UPDATED ${ageSeconds}s`;
+}
+
+export function liveAvailabilityBadge(
+  availability: LiveAvailability,
+  options: { checking?: boolean; active?: boolean } = {}
+): ChannelBadge {
+  if (options.active) return { label: "LIVE OPEN", ready: true, tone: "ready" };
+  if (options.checking) return { label: "LIVE CHECKING", ready: false, tone: "degraded" };
+
+  switch (availability) {
+    case "active":
+      return { label: "LIVE READY", ready: true, tone: "ready" };
+    case "inactive":
+      return { label: "LIVE WAITING", ready: false, tone: "degraded" };
+    case "disabled":
+      return { label: "LIVE OFF", ready: false, tone: "missing" };
+    case "error":
+      return { label: "LIVE ERROR", ready: false, tone: "missing" };
+  }
 }
 
 function sourceBadge(metadata: ReplayMetadata): ChannelBadge {

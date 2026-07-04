@@ -152,7 +152,7 @@ mod tests {
                 "session_key": 4,
                 "meeting_key": 10,
                 "session_name": "Sprint",
-                "session_type": "Sprint",
+                "session_type": "Race",
                 "date_start": "2023-01-01T18:00:00+00:00",
                 "date_end": "2023-01-01T19:00:00+00:00",
                 "year": 2023

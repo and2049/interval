@@ -4,7 +4,7 @@
 
 This project is an interactive Formula 1 second-screen dashboard designed for fans who are watching a race broadcast and want richer timing, strategy, and telemetry context on another screen. The product should feel inspired by real engineer-style displays while remaining understandable and usable for non-engineers.[cite:6]
 
-The build is **replay-first and live-capable**: historical sessions provide deterministic development, testing, demos, and portfolio presentation, while live race mode uses OpenF1 behind the same backend-owned snapshot contract. Historical replay now uses FastF1 as the primary telemetry source, with OpenF1 still used for discovery and live-race polling.[cite:6][cite:20]
+The build is **live/replay contract-first**: OpenF1 live sessions, deterministic live simulation, and historical replays all feed the same backend-owned snapshot contract. Historical sessions still provide deterministic development, testing, demos, and portfolio presentation. Historical replay now uses FastF1 as the primary telemetry source, with OpenF1 still used for discovery and live-race polling.[cite:6][cite:20]
 
 [image:1]
 
@@ -86,7 +86,7 @@ The interface should be optimized for **quick scanning**. Users should be able t
 - **Frontend:** SolidJS.
 - **Styling/UI:** Tailwind CSS.
 - **Primary app type:** Web app.
-- **Data mode:** Replay-first, live-capable.
+- **Data mode:** Live/replay contract-first.
 
 This stack is intended to balance performance, type safety, and a lightweight client. SolidJS is a good fit for a dashboard with many small, frequently updating UI regions, while Rust supports strong domain modeling, efficient replay processing, and live-ingestion services.
 

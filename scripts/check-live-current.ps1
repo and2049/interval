@@ -9,9 +9,10 @@ the live dashboard contract is healthy enough for a real race-window check.
 .PARAMETER Strict
 Enables the recommended real-session assertions:
 failed/stale/missing critical-channel failure, max runtime update age of 15 seconds, at least 10
-timing rows, and at least 10 track positions. Add -MinGeometryPoints 20 once cached, historical,
-or accumulated live location geometry is expected, and add -MinEvents 1 when validating after
-race-control, pit, weather, or derived events are expected.
+timing rows, at least 10 track positions, and live snapshot clock sync within 30 seconds of the
+OpenF1 session clock. Add -MinGeometryPoints 20 once cached, historical, or accumulated live
+location geometry is expected, and add -MinEvents 1 when validating after race-control, pit,
+weather, or derived events are expected.
 
 .PARAMETER AllowedBadChannels
 Live endpoints that may be missing, stale, or failed without failing strict validation. Defaults to
@@ -22,6 +23,19 @@ Fails if the active OpenF1 live meeting name does not exactly match this value.
 
 .PARAMETER ExpectedSessionType
 Fails if the active OpenF1 live session type does not match this value, for example race or sprint.
+
+.PARAMETER ExpectedNextMeetingName
+Fails if the next OpenF1 live meeting name does not exactly match this value when no live session is active.
+
+.PARAMETER ExpectedNextSessionType
+Fails if the next OpenF1 live session type does not match this value when no live session is active.
+
+.PARAMETER MaxSnapshotClockLagSeconds
+Fails if the live snapshot cursor is not synced to the OpenF1 session clock within this many seconds.
+Strict mode defaults this to 30 seconds.
+
+.PARAMETER WaitForActiveSeconds
+Polls /api/live/current until a live race or sprint becomes active, then runs the requested checks.
 
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File scripts/check-live-current.ps1 -Start -RequireActive -Strict
@@ -37,6 +51,16 @@ Starts/checks live mode and fails fast if OpenF1 reports a different meeting or 
 powershell -ExecutionPolicy Bypass -File scripts/check-live-current.ps1 -WatchSeconds 900 -Strict
 
 Watches an already-started live session for 15 minutes and fails if the live dashboard becomes unhealthy.
+
+.EXAMPLE
+powershell -ExecutionPolicy Bypass -File scripts/check-live-current.ps1 -ExpectedNextMeetingName "British Grand Prix" -ExpectedNextSessionType sprint
+
+Checks that OpenF1 reports the expected next live race or sprint before the session window opens.
+
+.EXAMPLE
+powershell -ExecutionPolicy Bypass -File scripts/check-live-current.ps1 -WaitForActiveSeconds 28800 -Start -RequireActive -Strict
+
+Waits up to eight hours for the next live race or sprint, starts it, and runs strict validation.
 #>
 
 param(
@@ -50,11 +74,16 @@ param(
     [int]$MinTrackPositions = 0,
     [int]$MinEvents = 0,
     [int]$MinGeometryPoints = 0,
+    [int]$MaxSnapshotClockLagSeconds = 0,
     [string[]]$AllowedBadChannels = @("intervals", "pit", "race_control", "stints", "weather", "session_result"),
     [long]$ExpectedSessionKey = 0,
     [string]$ExpectedMeetingName = "",
     [string]$ExpectedSessionType = "",
+    [long]$ExpectedNextSessionKey = 0,
+    [string]$ExpectedNextMeetingName = "",
+    [string]$ExpectedNextSessionType = "",
     [int]$WatchSeconds = 0,
+    [int]$WaitForActiveSeconds = 0,
     [int]$IntervalSeconds = 10
 )
 
@@ -70,7 +99,8 @@ if ($Strict) {
     if ($MaxUpdateAgeSeconds -le 0) { $MaxUpdateAgeSeconds = 15 }
     if ($MinTimingRows -le 0) { $MinTimingRows = 10 }
     if ($MinTrackPositions -le 0) { $MinTrackPositions = 10 }
-    Write-Output "strict: enabled max_update_age=${MaxUpdateAgeSeconds}s min_timing_rows=$MinTimingRows min_track_positions=$MinTrackPositions min_events=$MinEvents min_geometry_points=$MinGeometryPoints"
+    if ($MaxSnapshotClockLagSeconds -le 0) { $MaxSnapshotClockLagSeconds = 30 }
+    Write-Output "strict: enabled max_update_age=${MaxUpdateAgeSeconds}s max_snapshot_clock_lag=${MaxSnapshotClockLagSeconds}s min_timing_rows=$MinTimingRows min_track_positions=$MinTrackPositions min_events=$MinEvents min_geometry_points=$MinGeometryPoints"
 }
 
 function Request-Json($method, $path) {
@@ -152,6 +182,32 @@ function Assert-LiveRuntimeFresh($status, $maxAgeSeconds) {
     Write-Output ("runtime freshness: ok ({0:N1}s old)" -f ([Math]::Max(0, $ageSeconds)))
 }
 
+function Assert-LiveSnapshotClockSynced($snapshot, $metadata, $sessionStartTime, $maxLagSeconds) {
+    if ($maxLagSeconds -le 0) {
+        return
+    }
+    if (-not $sessionStartTime) {
+        throw "expected live session start_time for snapshot clock sync check"
+    }
+
+    try {
+        $sessionStart = [DateTimeOffset]::Parse([string]$sessionStartTime).ToUniversalTime()
+    } catch {
+        throw "could not parse live session start_time: $sessionStartTime"
+    }
+
+    $expectedT = ([DateTimeOffset]::UtcNow - $sessionStart).TotalSeconds
+    $expectedT = [Math]::Max(0, $expectedT)
+    if ($metadata.max_t -gt 0) {
+        $expectedT = [Math]::Min([double]$metadata.max_t, $expectedT)
+    }
+    $lagSeconds = [Math]::Abs(([double]$snapshot.cursor.t) - $expectedT)
+    if ($lagSeconds -gt $maxLagSeconds) {
+        throw ("live snapshot clock lag is {0:N1}s, max {1}s" -f $lagSeconds, $maxLagSeconds)
+    }
+    Write-Output ("snapshot clock: ok ({0:N1}s lag)" -f $lagSeconds)
+}
+
 function Assert-LiveSnapshotContent($snapshot, $minTimingRows, $minTrackPositions) {
     $timingRows = $snapshot.timing.rows.Count
     $trackPositions = $snapshot.track.positions.Count
@@ -216,6 +272,8 @@ function Write-LiveSnapshotSummary {
         [int]$MinTrackPositions = 0,
         [int]$MinEvents = 0,
         [int]$MinGeometryPoints = 0,
+        [int]$MaxSnapshotClockLagSeconds = 0,
+        [string]$SessionStartTime = "",
         [string[]]$AllowedBadChannels = @()
     )
 
@@ -239,6 +297,7 @@ function Write-LiveSnapshotSummary {
     Assert-LiveSnapshotContent $snapshot $MinTimingRows $MinTrackPositions
     Assert-LiveEventFeed $events $MinEvents
     Assert-LiveGeometry $geometry $MinGeometryPoints
+    Assert-LiveSnapshotClockSynced $snapshot $metadata $SessionStartTime $MaxSnapshotClockLagSeconds
     Assert-LiveRuntimeFresh $status $MaxUpdateAgeSeconds
     if ($FailOnBadChannels) {
         Assert-LiveChannelsHealthy $status.channels $AllowedBadChannels
@@ -257,7 +316,7 @@ if ($current.meeting) {
     Write-Output "meeting: $($current.meeting.name) - $($current.meeting.location), $($current.meeting.country)"
 }
 if ($current.next_session) {
-    Write-Output "next: $($current.next_session.year) $($current.next_session.name) key=$($current.next_session.session_key) start=$($current.next_session.start_time)"
+    Write-Output "next: $($current.next_session.year) $($current.next_session.name) [$($current.next_session.session_type)] key=$($current.next_session.session_key) start=$($current.next_session.start_time)"
 }
 if ($current.message) {
     Write-Output "message: $($current.message)"
@@ -267,7 +326,36 @@ if ($current.status) {
     Write-ChannelSummary $current.status.channels
 }
 
+if ((-not $current.active -or -not $current.session) -and $WaitForActiveSeconds -gt 0) {
+    $deadline = (Get-Date).AddSeconds($WaitForActiveSeconds)
+    Write-Output "waiting for live session: up to ${WaitForActiveSeconds}s"
+    while ((Get-Date) -lt $deadline -and (-not $current.active -or -not $current.session)) {
+        Start-Sleep -Seconds ([Math]::Max(1, $IntervalSeconds))
+        $current = Request-Json "GET" "/api/live/current"
+        Write-Output "availability: $($current.availability) active=$($current.active)"
+        if ($current.next_session) {
+            Write-Output "next: $($current.next_session.year) $($current.next_session.name) [$($current.next_session.session_type)] key=$($current.next_session.session_key) start=$($current.next_session.start_time)"
+        }
+    }
+    if (-not $current.active -or -not $current.session) {
+        throw "timed out waiting ${WaitForActiveSeconds}s for an active OpenF1 live session"
+    }
+    Write-Output "session: $($current.session.year) $($current.session.name) [$($current.session.session_type)] key=$($current.session.session_key)"
+    if ($current.meeting) {
+        Write-Output "meeting: $($current.meeting.name) - $($current.meeting.location), $($current.meeting.country)"
+    }
+}
+
 if (-not $current.active -or -not $current.session) {
+    if ($ExpectedNextSessionKey -gt 0 -and (-not $current.next_session -or [long]$current.next_session.session_key -ne $ExpectedNextSessionKey)) {
+        throw "expected next live session $ExpectedNextSessionKey but got $($current.next_session.session_key)"
+    }
+    if ($ExpectedNextMeetingName.Trim() -and (-not $current.next_meeting -or $current.next_meeting.name -ne $ExpectedNextMeetingName)) {
+        throw "expected next live meeting '$ExpectedNextMeetingName' but got '$($current.next_meeting.name)'"
+    }
+    if ($ExpectedNextSessionType.Trim() -and (-not $current.next_session -or $current.next_session.session_type -ne $ExpectedNextSessionType)) {
+        throw "expected next live session type '$ExpectedNextSessionType' but got '$($current.next_session.session_type)'"
+    }
     if ($RequireActive) {
         throw "expected an active OpenF1 live session from /api/live/current"
     }
@@ -296,13 +384,13 @@ if ($Start) {
     exit 0
 }
 
-Write-LiveSnapshotSummary -SessionKey $sessionKey -FailOnBadChannels:$FailOnBadChannels -MaxUpdateAgeSeconds $MaxUpdateAgeSeconds -MinTimingRows $MinTimingRows -MinTrackPositions $MinTrackPositions -MinEvents $MinEvents -MinGeometryPoints $MinGeometryPoints -AllowedBadChannels $AllowedBadChannels
+Write-LiveSnapshotSummary -SessionKey $sessionKey -FailOnBadChannels:$FailOnBadChannels -MaxUpdateAgeSeconds $MaxUpdateAgeSeconds -MinTimingRows $MinTimingRows -MinTrackPositions $MinTrackPositions -MinEvents $MinEvents -MinGeometryPoints $MinGeometryPoints -MaxSnapshotClockLagSeconds $MaxSnapshotClockLagSeconds -SessionStartTime $current.session.start_time -AllowedBadChannels $AllowedBadChannels
 
 if ($WatchSeconds -gt 0) {
     $deadline = (Get-Date).AddSeconds($WatchSeconds)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds ([Math]::Max(1, $IntervalSeconds))
         Write-Output "---"
-        Write-LiveSnapshotSummary -SessionKey $sessionKey -FailOnBadChannels:$FailOnBadChannels -MaxUpdateAgeSeconds $MaxUpdateAgeSeconds -MinTimingRows $MinTimingRows -MinTrackPositions $MinTrackPositions -MinEvents $MinEvents -MinGeometryPoints $MinGeometryPoints -AllowedBadChannels $AllowedBadChannels
+        Write-LiveSnapshotSummary -SessionKey $sessionKey -FailOnBadChannels:$FailOnBadChannels -MaxUpdateAgeSeconds $MaxUpdateAgeSeconds -MinTimingRows $MinTimingRows -MinTrackPositions $MinTrackPositions -MinEvents $MinEvents -MinGeometryPoints $MinGeometryPoints -MaxSnapshotClockLagSeconds $MaxSnapshotClockLagSeconds -SessionStartTime $current.session.start_time -AllowedBadChannels $AllowedBadChannels
     }
 }

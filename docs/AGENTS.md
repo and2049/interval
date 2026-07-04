@@ -2,7 +2,7 @@
 
 ## Project identity
 
-This repository contains an interactive Formula 1 second-screen dashboard focused on replay-first race analysis and live race support. The product is inspired by engineer-style timing displays, but the intended audience is fans who want faster race understanding while watching a broadcast or replay.[cite:6][cite:20]
+This repository contains an interactive Formula 1 second-screen dashboard focused on one shared live/replay race model. The product is inspired by engineer-style timing displays, but the intended audience is fans who want faster race understanding while watching a broadcast or replay.[cite:6][cite:20]
 
 The architecture currently supports three data modes:
 
@@ -24,7 +24,7 @@ The architecture currently supports three data modes:
 - **Frontend:** SolidJS.
 - **Styling:** Tailwind CSS.
 - **App shape:** Web app, not Electron by default.
-- **Delivery model:** Replay-first, live-capable.
+- **Delivery model:** Live/replay contract-first.
 
 ## Product principles
 
@@ -113,8 +113,8 @@ Avoid passing raw upstream payloads directly into UI components when a normalize
 
 ## Replay/live contract rules
 
-Historical replay remains the deterministic validation path. Live mode should use
-the same backend-owned snapshot/event model, not a separate UI model.
+Historical replay remains the deterministic validation path. Live mode uses the
+same backend-owned snapshot/event model, not a separate UI model.
 
 - Every dashboard panel should work against historical replay data and live snapshots.[cite:6]
 - Replay state must be deterministic.
@@ -235,7 +235,7 @@ Keep docs concise but specific. Prefer real examples over vague guidance.
 
 When making design or implementation decisions, follow this order:
 
-1. Preserve replay-first simplicity.
+1. Preserve one live/replay dashboard contract.
 2. Keep replay, live simulation, and OpenF1 live on one dashboard contract.
 3. Favor normalized domain models.
 4. Prefer lightweight UI patterns.

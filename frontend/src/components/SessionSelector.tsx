@@ -1,6 +1,7 @@
 import { batch, createEffect, createResource, createSignal, Show, untrack } from "solid-js";
-import type { IngestResponse, Session } from "../../../shared/types/api";
+import type { IngestResponse, LiveAvailability, Session } from "../../../shared/types/api";
 import { api } from "../lib/api";
+import { badgeClass, liveAvailabilityBadge } from "../lib/replayQuality";
 import {
   canOpenSessionFromCache,
   canOpenSessionAfterIngest,
@@ -39,6 +40,7 @@ interface SessionSelectorProps {
   onSessionIntent?: (sessionKey?: number) => void;
   onSelectionChange?: (selection: { sessionKey?: number; label?: string }) => void;
   liveStatusMessage?: string;
+  liveAvailability?: LiveAvailability;
   liveChecking?: boolean;
   liveActive?: boolean;
   onCheckLive?: () => void;
@@ -245,6 +247,11 @@ export function SessionSelector(props: SessionSelectorProps) {
     });
   const latestOutcome = () => ingestOutcome(lastIngest());
   const selectorLocked = () => props.liveActive === true;
+  const liveBadge = () =>
+    liveAvailabilityBadge(props.liveAvailability ?? "inactive", {
+      checking: props.liveChecking,
+      active: props.liveActive
+    });
 
   return (
     <div
@@ -313,6 +320,10 @@ export function SessionSelector(props: SessionSelectorProps) {
       >
         {props.liveActive ? "LIVE OPEN" : props.liveChecking ? "CHECKING LIVE" : "OPEN LIVE"}
       </button>
+
+      <span class={`border px-2 py-1 ${badgeClass(liveBadge().tone)}`}>
+        {liveBadge().label}
+      </span>
 
       <Show when={sessionActionStatus(ingestState())}>
         {(message) => <span class="text-amber">{message()}</span>}

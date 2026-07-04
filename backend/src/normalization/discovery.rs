@@ -47,11 +47,11 @@ pub fn race_sessions_from_openf1(payload: Value) -> anyhow::Result<Vec<Session>>
 fn supported_session_type(session_type: &str, session_name: &str) -> Option<SessionType> {
     let type_label = session_type.trim().to_lowercase();
     let name_label = session_name.trim().to_lowercase();
-    if type_label == "race" || name_label == "race" {
-        return Some(SessionType::Race);
-    }
     if type_label == "sprint" || name_label == "sprint" || name_label == "sprint race" {
         return Some(SessionType::Sprint);
+    }
+    if type_label == "race" || name_label == "race" {
+        return Some(SessionType::Race);
     }
     None
 }

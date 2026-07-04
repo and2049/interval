@@ -3,6 +3,7 @@ import type { ReplayMetadata } from "../../../shared/types/api";
 import {
   badgeClass,
   channelBadges,
+  liveAvailabilityBadge,
   liveChannelBadges,
   liveDashboardBadges,
   liveStatusLabel,
@@ -179,6 +180,26 @@ describe("liveStatusLabel", () => {
 
   test("falls back to connection state when update timestamp is missing", () => {
     expect(liveStatusLabel("reconnecting")).toBe("LIVE reconnecting");
+  });
+});
+
+describe("liveAvailabilityBadge", () => {
+  test("labels startup live availability as a primary status", () => {
+    expect(liveAvailabilityBadge("active")).toMatchObject({ label: "LIVE READY", tone: "ready" });
+    expect(liveAvailabilityBadge("inactive")).toMatchObject({
+      label: "LIVE WAITING",
+      tone: "degraded"
+    });
+    expect(liveAvailabilityBadge("disabled")).toMatchObject({ label: "LIVE OFF", tone: "missing" });
+    expect(liveAvailabilityBadge("error")).toMatchObject({ label: "LIVE ERROR", tone: "missing" });
+    expect(liveAvailabilityBadge("inactive", { checking: true })).toMatchObject({
+      label: "LIVE CHECKING",
+      tone: "degraded"
+    });
+    expect(liveAvailabilityBadge("inactive", { active: true })).toMatchObject({
+      label: "LIVE OPEN",
+      tone: "ready"
+    });
   });
 });
 
