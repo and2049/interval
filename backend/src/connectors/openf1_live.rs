@@ -740,3 +740,317 @@ impl OpenF1LiveClient {
     }
 }
 
+fn auth_headers(
+    config: &OpenF1LiveConfig,
+    bearer: Option<&BearerToken>,
+) -> Result<HeaderMap, OpenF1LiveError> {
+    let mut headers = HeaderMap::new();
+    let Some(bearer) = bearer else {
+        return Ok(headers);
+    };
+    let name = HeaderName::from_bytes(config.auth_header.as_bytes())
+        .map_err(|_| OpenF1LiveError::InvalidAuthHeader(config.auth_header.clone()))?;
+    let value = if name == AUTHORIZATION {
+        authorization_header_value(&bearer.value)
+    } else {
+        bearer.value.clone()
+    };
+    headers.insert(
+        name,
+        HeaderValue::from_str(&value).map_err(|_| OpenF1LiveError::InvalidAuthHeaderValue)?,
+    );
+    Ok(headers)
+}
+
+impl LiveRequestLimiter {
+    fn new(interval: Duration, per_window: usize, window: Duration) -> Self {
+        Self {
+            interval,
+            per_window,
+            window,
+            next_request: None,
+            paused_until: None,
+            sent: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Blocks until a request may go out, then books it. Callers hold the limiter's
+    /// mutex across this call, which is what serialises them.
+    async fn wait_turn(&mut self) {
+        loop {
+            let now = Instant::now();
+            while self
+                .sent
+                .front()
+                .is_some_and(|sent| now.duration_since(*sent) >= self.window)
+            {
+                self.sent.pop_front();
+            }
+            let mut ready_at = now;
+            if let Some(next) = self.next_request.filter(|next| *next > ready_at) {
+                ready_at = next;
+            }
+            if let Some(paused) = self.paused_until.filter(|paused| *paused > ready_at) {
+                ready_at = paused;
+            }
+            if self.sent.len() >= self.per_window {
+                if let Some(oldest) = self.sent.front() {
+                    ready_at = ready_at.max(*oldest + self.window);
+                }
+            }
+            if ready_at <= now {
+                break;
+            }
+            tokio::time::sleep(ready_at.duration_since(now)).await;
+        }
+        let now = Instant::now();
+        self.sent.push_back(now);
+        self.next_request = Some(now + self.interval);
+    }
+
+    /// Holds every request back until `until`. Called on a 429 so the other pollers
+    /// stop piling onto a budget that is already spent.
+    fn pause_until(&mut self, until: Instant) {
+        if self.paused_until.is_none_or(|paused| until > paused) {
+            self.paused_until = Some(until);
+        }
+    }
+}
+
+fn live_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(OPENF1_LIVE_REQUEST_TIMEOUT_SECONDS))
+        .build()
+        .expect("valid OpenF1 live HTTP client")
+}
+
+/// Builds a live endpoint URL. OpenF1's comparison filters put the operator in the key
+/// (`date>=2026-...`) and the server parses the percent-decoded query as a whole, so the
+/// decoded string must read `date>=VALUE`. `query_pairs_mut` would send `date%3E%3D=VALUE`,
+/// which decodes to `date>==VALUE`, an unknown filter that matches nothing and comes back
+/// 404. Here a trailing `=` in the key becomes the key/value separator itself (the `url`
+/// crate still escapes `>`, giving `date%3E=VALUE`, which is verified to work).
+fn live_endpoint_url(
+    base_url: &Url,
+    endpoint: &str,
+    params: &[(String, String)],
+) -> Result<Url, OpenF1LiveError> {
+    let mut url = base_url.join(endpoint)?;
+    let query = params
+        .iter()
+        .map(|(key, value)| {
+            let key = key.strip_suffix('=').unwrap_or(key);
+            let value: String = url::form_urlencoded::byte_serialize(value.as_bytes()).collect();
+            format!("{key}={value}")
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    url.set_query(Some(&query));
+    Ok(url)
+}
+
+/// A `Retry-After` header given in seconds. The HTTP-date form is not handled; the
+/// default pause covers it.
+fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+}
+
+/// `{"detail":"No results found."}`, OpenF1's body for an empty result set.
+fn is_no_results_body(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("detail")?.as_str().map(str::to_ascii_lowercase))
+        .is_some_and(|detail| detail.contains("no results"))
+}
+
+fn is_auth_rejection(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
+}
+
+/// The token endpoint lives at the API host root, not under `/v1/`, so it is derived
+/// from the configured base URL rather than joined onto it. A compatible mirror at
+/// `https://example.test/v1/` is expected to issue tokens at `https://example.test/token`.
+fn token_url(base_url: &Url) -> Result<Url, OpenF1LiveError> {
+    Ok(base_url.join(TOKEN_PATH)?)
+}
+
+fn token_lifetime(expires_in: Option<u64>) -> Duration {
+    let seconds = expires_in.unwrap_or(DEFAULT_TOKEN_LIFETIME_SECONDS);
+    Duration::from_secs(seconds.saturating_sub(TOKEN_REFRESH_MARGIN_SECONDS))
+}
+
+fn authorization_header_value(token: &str) -> String {
+    if token
+        .trim_start()
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+    {
+        token.trim_start().to_string()
+    } else {
+        format!("Bearer {token}")
+    }
+}
+
+fn live_window_rank(session: &Session, now: DateTime<Utc>) -> Option<(u8, i64)> {
+    let Ok(start) = DateTime::parse_from_rfc3339(&session.start_time) else {
+        return None;
+    };
+    let start = start.with_timezone(&Utc);
+    let end = live_session_end_or_default(start, &session.end_time);
+    let close = end + ChronoDuration::minutes(LIVE_WINDOW_PADDING_MINUTES);
+    if now < start || now > close {
+        return None;
+    }
+    if now >= start && now <= end {
+        return Some((0, now.signed_duration_since(start).num_milliseconds().abs()));
+    }
+    Some((1, now.signed_duration_since(end).num_milliseconds()))
+}
+
+fn live_session_end_or_default(start: DateTime<Utc>, end_time: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(end_time)
+        .map(|value| value.with_timezone(&Utc))
+        .ok()
+        .filter(|end| *end > start)
+        .unwrap_or_else(|| start + ChronoDuration::hours(3))
+}
+
+fn live_base_url_from_env_value(value: Option<String>) -> (Url, Option<String>) {
+    match value {
+        Some(value) => match Url::parse(&value) {
+            Ok(url) => (with_trailing_slash(url), None),
+            Err(error) => (
+                Url::parse(DEFAULT_BASE_URL).expect("valid OpenF1 live base URL"),
+                Some(format!("INTERVAL_OPENF1_LIVE_BASE_URL is invalid: {error}")),
+            ),
+        },
+        None => (
+            Url::parse(DEFAULT_BASE_URL).expect("valid OpenF1 live base URL"),
+            None,
+        ),
+    }
+}
+
+fn live_enabled_from_env_value(value: Option<String>) -> bool {
+    !matches!(
+        value
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
+}
+
+fn with_trailing_slash(mut url: Url) -> Url {
+    if !url.path().ends_with('/') {
+        let path = format!("{}/", url.path());
+        url.set_path(&path);
+    }
+    url
+}
+
+fn live_endpoint_params(
+    session_key: i64,
+    endpoint: &str,
+    since: Option<DateTime<Utc>>,
+) -> Vec<(String, String)> {
+    let mut params = vec![("session_key".to_string(), session_key.to_string())];
+    if let Some((field, since)) = since.and_then(|since| {
+        LIVE_ENDPOINTS
+            .iter()
+            .find(|spec| spec.name == endpoint)
+            .and_then(|spec| spec.incremental_field)
+            .map(|field| (field, since))
+    }) {
+        params.push((format!("{field}>="), since.to_rfc3339()));
+    }
+    params
+}
+
+fn current_live_session_from_schedule(
+    sessions: &[Session],
+    meetings: &[Meeting],
+    now: DateTime<Utc>,
+) -> Option<ActiveLiveSession> {
+    let mut sessions = sessions.to_vec();
+    sessions.sort_by_key(|session| live_window_rank(session, now));
+    sessions.into_iter().find_map(|session| {
+        live_window_rank(&session, now)?;
+        Some(active_live_session(session, meetings))
+    })
+}
+
+fn next_live_session_from_schedule(
+    sessions: &[Session],
+    meetings: &[Meeting],
+    now: DateTime<Utc>,
+) -> Option<ActiveLiveSession> {
+    let mut sessions = sessions.to_vec();
+    sessions.sort_by_key(|session| session.start_time.clone());
+    sessions.into_iter().find_map(|session| {
+        let start = DateTime::parse_from_rfc3339(&session.start_time)
+            .ok()?
+            .with_timezone(&Utc);
+        if start <= now {
+            return None;
+        }
+        Some(active_live_session(session, meetings))
+    })
+}
+
+fn active_live_session(session: Session, meetings: &[Meeting]) -> ActiveLiveSession {
+    let meeting = meetings
+        .iter()
+        .find(|meeting| meeting.meeting_key == session.meeting_key)
+        .cloned();
+    ActiveLiveSession { session, meeting }
+}
+
+#[derive(Debug, Error)]
+pub enum OpenF1LiveError {
+    #[error("OpenF1 live mode is disabled")]
+    Disabled,
+    #[error("OpenF1 live configuration error: {0}")]
+    Config(String),
+    #[error("invalid OpenF1 live url: {0}")]
+    Url(#[from] url::ParseError),
+    #[error("OpenF1 rejected the credentials (HTTP {0})")]
+    Unauthorized(u16),
+    #[error("OpenF1 token endpoint returned an unexpected response: {0}")]
+    TokenResponse(String),
+    #[error("OpenF1 rate limit reached on {endpoint} (HTTP 429); live polling paused for {pause_seconds}s")]
+    RateLimited { endpoint: String, pause_seconds: u64 },
+    #[error("OpenF1 {endpoint} returned HTTP {status}: {body}")]
+    Status {
+        endpoint: String,
+        status: u16,
+        body: String,
+    },
+    #[error("OpenF1 live request failed: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("OpenF1 live normalization failed: {0}")]
+    Normalize(#[from] anyhow::Error),
+    #[error("invalid OpenF1 live auth header: {0}")]
+    InvalidAuthHeader(String),
+    #[error("invalid OpenF1 live auth header value")]
+    InvalidAuthHeaderValue,
+}
+
+trait DateYear {
+    fn year(&self) -> i32;
+}
+
+impl DateYear for DateTime<Utc> {
+    fn year(&self) -> i32 {
+        chrono::Datelike::year(self)
+    }
+}
+
