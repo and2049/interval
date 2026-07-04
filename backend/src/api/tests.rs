@@ -507,6 +507,346 @@ async fn public_replay_routes_return_not_found_for_missing_replay() {
     }
 }
 
+#[tokio::test]
+async fn live_current_is_inactive_when_openf1_live_is_disabled() {
+    let app = seeded_router_with_live_enabled(false).await;
+
+    let payload = get_json(app, "/api/live/current", StatusCode::OK).await;
+
+    assert_eq!(payload["availability"], "disabled");
+    assert_eq!(payload["active"], false);
+    assert_eq!(payload["session"], Value::Null);
+    assert!(payload["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("disabled")));
+}
+
+#[tokio::test]
+async fn live_start_reports_bad_request_when_openf1_live_is_disabled() {
+    let app = seeded_router_with_live_enabled(false).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/123/live/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload = serde_json::from_slice::<Value>(&body).unwrap();
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|message| message.contains("OpenF1 live mode is disabled")));
+}
+
+#[tokio::test]
+async fn live_current_reports_error_when_openf1_discovery_fails() {
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: "http://127.0.0.1:9/v1/".parse().unwrap(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let payload = get_json(app, "/api/live/current", StatusCode::OK).await;
+
+    assert_eq!(payload["availability"], "error");
+    assert_eq!(payload["active"], false);
+    assert!(payload["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("OpenF1 live discovery failed")));
+}
+
+#[tokio::test]
+async fn live_start_reports_bad_gateway_when_openf1_discovery_fails() {
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: "http://127.0.0.1:9/v1/".parse().unwrap(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/123/live/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload = serde_json::from_slice::<Value>(&body).unwrap();
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|message| message.contains("OpenF1 live request failed")));
+}
+
+#[tokio::test]
+async fn live_current_reports_configuration_errors() {
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config_error(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: "https://api.openf1.org/v1/".parse().unwrap(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+        "INTERVAL_OPENF1_LIVE_BASE_URL is invalid",
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let payload = get_json(app, "/api/live/current", StatusCode::OK).await;
+
+    assert_eq!(payload["availability"], "error");
+    assert_eq!(payload["active"], false);
+    assert!(payload["message"].as_str().is_some_and(|message| {
+        message.contains("OpenF1 live configuration error")
+            && message.contains("INTERVAL_OPENF1_LIVE_BASE_URL")
+    }));
+}
+
+#[tokio::test]
+async fn live_start_reports_bad_gateway_when_openf1_live_is_misconfigured() {
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config_error(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: "https://api.openf1.org/v1/".parse().unwrap(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+        "INTERVAL_OPENF1_LIVE_BASE_URL is invalid",
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/123/live/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload = serde_json::from_slice::<Value>(&body).unwrap();
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|message| message.contains("OpenF1 live configuration error")));
+}
+
+#[tokio::test]
+async fn live_start_reports_bad_gateway_when_openf1_live_auth_header_is_invalid() {
+    let live_mock = spawn_openf1_live_mock().await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::Token("token".to_string()),
+            auth_header: "bad header".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/sessions/{}/live/start",
+                    live_mock.session_key
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload = serde_json::from_slice::<Value>(&body).unwrap();
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|message| message.contains("invalid OpenF1 live auth header")));
+}
+
+#[tokio::test]
+async fn live_current_is_inactive_when_session_window_is_future() {
+    let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
+        start_offset: ChronoDuration::hours(2),
+        end_offset: ChronoDuration::hours(4),
+        ..LiveMockConfig::default()
+    })
+    .await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let current = get_json(app.clone(), "/api/live/current", StatusCode::OK).await;
+
+    assert_eq!(current["availability"], "inactive");
+    assert_eq!(current["active"], false);
+    assert_eq!(current["session"], Value::Null);
+    assert_eq!(
+        current["next_session"]["session_key"],
+        live_mock.session_key
+    );
+    assert_eq!(current["next_meeting"]["name"], "Test Live Grand Prix");
+}
+
+#[tokio::test]
+async fn live_current_is_inactive_during_pre_session_padding() {
+    let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
+        start_offset: ChronoDuration::minutes(15),
+        end_offset: ChronoDuration::hours(2),
+        ..LiveMockConfig::default()
+    })
+    .await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let current = get_json(app.clone(), "/api/live/current", StatusCode::OK).await;
+
+    assert_eq!(current["availability"], "inactive");
+    assert_eq!(current["active"], false);
+    assert_eq!(current["session"], Value::Null);
+    assert_eq!(
+        current["next_session"]["session_key"],
+        live_mock.session_key
+    );
+}
+
+#[tokio::test]
+async fn live_current_detects_active_sprint_sessions() {
+    let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
+        session_name: "Sprint",
+        session_type: "Sprint",
+        ..LiveMockConfig::default()
+    })
+    .await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let current = get_json(app.clone(), "/api/live/current", StatusCode::OK).await;
+
+    assert_eq!(current["availability"], "active");
+    assert_eq!(current["active"], true);
+    assert_eq!(current["session"]["session_type"], "sprint");
+    assert_eq!(current["session"]["session_key"], live_mock.session_key);
+
+    let status = post_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/start", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(status["source"], "openf1_live");
+
+    let metadata = get_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/metadata", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(metadata["session"]["session_type"], "sprint");
+
+    let snapshot = get_json(
+        app,
+        &format!("/api/sessions/{}/live/snapshot", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(snapshot["cursor"]["session_key"], live_mock.session_key);
+    assert!(
+        !snapshot["timing"]["rows"].as_array().unwrap().is_empty(),
+        "snapshot payload: {snapshot}"
+    );
+}
+
 async fn seeded_router() -> Router {
     let pool = storage::connect("sqlite::memory:").await.unwrap();
     storage::migrate(&pool).await.unwrap();
