@@ -492,3 +492,432 @@ impl OpenF1LiveRegistry {
     }
 }
 
+fn merge_live_payload(previous: Option<RawEndpoint>, mut fetched: RawEndpoint) -> RawEndpoint {
+    let Some(previous) = previous else {
+        return fetched;
+    };
+    let Value::Array(mut rows) = previous.payload else {
+        return fetched;
+    };
+    let Value::Array(fetched_rows) = fetched.payload else {
+        // A malformed (non-array) payload must not clobber accumulated rows.
+        fetched.payload = Value::Array(rows);
+        return fetched;
+    };
+
+    let mut indexes = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| live_row_key(&fetched.endpoint, row).map(|key| (key, index)))
+        .collect::<HashMap<_, _>>();
+    for row in fetched_rows {
+        let Some(key) = live_row_key(&fetched.endpoint, &row) else {
+            continue;
+        };
+        if let Some(index) = indexes.get(&key).copied() {
+            rows[index] = row;
+        } else {
+            indexes.insert(key, rows.len());
+            rows.push(row);
+        }
+    }
+    trim_live_payload_rows(&fetched.endpoint, &mut rows);
+    fetched.payload = Value::Array(rows);
+    fetched
+}
+
+fn live_row_key(endpoint: &str, row: &Value) -> Option<String> {
+    let driver = row.get("driver_number").and_then(Value::as_i64);
+    let key = match endpoint {
+        // Rows on these endpoints mutate as data fills in (sector times,
+        // stint lap_end, ...), so key on row identity to replace older
+        // versions instead of accumulating duplicates.
+        "laps" => driver
+            .zip(row.get("lap_number").and_then(Value::as_i64))
+            .map(|(driver, lap)| format!("{driver}:{lap}")),
+        "stints" => driver
+            .zip(row.get("stint_number").and_then(Value::as_i64))
+            .map(|(driver, stint)| format!("{driver}:{stint}")),
+        "drivers" | "session_result" => driver.map(|driver| driver.to_string()),
+        // Distinct race control messages routinely share a timestamp, so the
+        // full row is the only collision-free key.
+        "race_control" => None,
+        _ => row
+            .get("date")
+            .and_then(Value::as_str)
+            .map(|date| format!("{}:{date}", driver.unwrap_or_default())),
+    };
+    key.or_else(|| serde_json::to_string(row).ok())
+}
+
+fn live_session_with_refresh_error(
+    mut session: OpenF1LiveSession,
+    error: anyhow::Error,
+) -> OpenF1LiveSession {
+    let now = Utc::now();
+    let message = format!("OpenF1 live refresh failed: {error}");
+    if let Some(entry) = session
+        .raw_bundle
+        .iter_mut()
+        .find(|entry| entry.raw.endpoint == "refresh")
+    {
+        entry.fetched_at = now;
+        entry.attempted_at = now;
+        entry.failure_count = entry.failure_count.saturating_add(1);
+        entry.last_error = Some(message);
+    } else {
+        session.raw_bundle.push(LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "refresh".to_string(),
+                session_key: session.session.session_key,
+                payload: Value::Array(vec![]),
+            },
+            fetched_at: now,
+            attempted_at: now,
+            failure_count: 1,
+            last_error: Some(message),
+        });
+    }
+    session.updated_at = now.to_rfc3339();
+    session
+}
+
+fn live_retry_delay(cadence_ms: i64, failure_count: u32) -> ChronoDuration {
+    let multiplier = 1_i64 << failure_count.min(5);
+    ChronoDuration::milliseconds((cadence_ms * multiplier).min(30_000))
+}
+
+fn live_session_refresh_is_fresh(session: &OpenF1LiveSession, now: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(&session.updated_at)
+        .map(|updated| {
+            now.signed_duration_since(updated.with_timezone(&Utc))
+                < ChronoDuration::milliseconds((LIVE_FRAME_STEP_SECONDS * 1_000.0) as i64)
+        })
+        .unwrap_or(false)
+}
+
+fn live_incremental_since(
+    endpoint: &LiveCachedEndpoint,
+    incremental_field: Option<&str>,
+) -> DateTime<Utc> {
+    incremental_field
+        .and_then(|field| latest_row_timestamp(&endpoint.raw.payload, field))
+        .unwrap_or(endpoint.fetched_at)
+        - ChronoDuration::seconds(LIVE_INCREMENTAL_ROW_OVERLAP_SECONDS)
+}
+
+fn latest_row_timestamp(payload: &Value, field: &str) -> Option<DateTime<Utc>> {
+    payload
+        .as_array()?
+        .iter()
+        .filter_map(|row| row.get(field)?.as_str())
+        .filter_map(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+        .max()
+}
+
+fn trim_live_payload_rows(endpoint: &str, rows: &mut Vec<Value>) {
+    let limit = live_endpoint_row_limit(endpoint);
+    if rows.len() > limit {
+        rows.drain(..rows.len() - limit);
+    }
+}
+
+fn live_endpoint_row_limit(endpoint: &str) -> usize {
+    match endpoint {
+        "location" => 20_000,
+        "position" | "intervals" => 8_000,
+        "laps" => 4_000,
+        "pit" | "race_control" | "weather" => 1_000,
+        _ => DEFAULT_LIVE_ENDPOINT_ROW_LIMIT,
+    }
+}
+
+fn ensure_live_data_usable(
+    data: &normalization::RaceData,
+    bundle: &[LiveCachedEndpoint],
+) -> anyhow::Result<()> {
+    if data.drivers.is_empty() {
+        if let Some(error) = live_endpoint_error(bundle, "drivers") {
+            return Err(anyhow::anyhow!(error.to_string()));
+        }
+        return Err(anyhow::anyhow!(
+            "OpenF1 live initial snapshot has no driver data"
+        ));
+    }
+
+    if data.positions.is_empty()
+        && data.intervals.is_empty()
+        && data.laps.is_empty()
+        && data.locations.is_empty()
+        && data.session_results.is_empty()
+    {
+        for endpoint in [
+            "position",
+            "intervals",
+            "laps",
+            "location",
+            "session_result",
+        ] {
+            if let Some(error) = live_endpoint_error(bundle, endpoint) {
+                return Err(anyhow::anyhow!(error.to_string()));
+            }
+        }
+        return Err(anyhow::anyhow!(
+            "OpenF1 live initial snapshot has no timing/location data"
+        ));
+    }
+
+    Ok(())
+}
+
+fn live_endpoint_error<'a>(bundle: &'a [LiveCachedEndpoint], endpoint: &str) -> Option<&'a str> {
+    bundle
+        .iter()
+        .find(|cached| cached.raw.endpoint == endpoint)
+        .and_then(|cached| cached.last_error.as_deref())
+}
+
+async fn live_track_geometry(
+    pool: &SqlitePool,
+    session: &Session,
+    meeting: Option<&Meeting>,
+    data: &normalization::RaceData,
+) -> anyhow::Result<TrackGeometry> {
+    if let Some(geometry) = storage::get_track_geometry(pool, session.session_key).await? {
+        return Ok(geometry);
+    }
+    if let Some(meeting) = meeting {
+        if let Some(geometry) =
+            storage::get_reusable_track_geometry_for_meeting(pool, meeting, session.session_key)
+                .await?
+        {
+            storage::replace_track_geometry(pool, &geometry).await?;
+            return Ok(geometry);
+        }
+    }
+    if let Some(geometry) = replay::track_geometry_builder::build_track_geometry_from_lap(
+        session.session_key,
+        data,
+        TrackGeometrySource::OpenF1Location,
+    ) {
+        // Persist so the map stays stable across refreshes instead of being
+        // rebuilt from a sliding telemetry window, and so later sessions at
+        // this meeting can reuse it.
+        storage::replace_track_geometry(pool, &geometry).await?;
+        return Ok(geometry);
+    }
+
+    // No clean flying lap in the window yet: use the curated/schematic
+    // fallback rather than a degenerate shape built from partial traces.
+    Ok(replay::track_geometry_builder::build_track_geometry(
+        session.session_key,
+        &[],
+        TrackGeometrySource::OpenF1Location,
+    ))
+}
+
+async fn live_session(
+    pool: &SqlitePool,
+    client: &OpenF1LiveClient,
+    session_key: i64,
+) -> anyhow::Result<Session> {
+    if !client.enabled() {
+        return Err(anyhow::anyhow!("OpenF1 live mode is disabled"));
+    }
+    let active = client
+        .current_session(Utc::now())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no active OpenF1 live session"))?;
+    if active.session.session_key != session_key {
+        return Err(anyhow::anyhow!(
+            "requested session is not the active OpenF1 live session"
+        ));
+    }
+    if let Some(meeting) = &active.meeting {
+        storage::upsert_meetings(pool, std::slice::from_ref(meeting)).await?;
+    }
+    storage::upsert_sessions(pool, std::slice::from_ref(&active.session)).await?;
+    Ok(active.session)
+}
+
+fn status_from_session(session: &OpenF1LiveSession, active: bool) -> LiveSessionStatus {
+    LiveSessionStatus {
+        session_key: session.session.session_key,
+        active,
+        current_t: Some(session.snapshot.cursor.t),
+        max_t: Some(session.metadata.max_t),
+        started_at: Some(session.started_at.clone()),
+        updated_at: Some(session.updated_at.clone()),
+        source: Some("openf1_live".to_string()),
+        channels: live_channel_health(&session.raw_bundle, Utc::now()),
+    }
+}
+
+fn inactive_status(session_key: i64) -> LiveSessionStatus {
+    LiveSessionStatus {
+        session_key,
+        active: false,
+        current_t: None,
+        max_t: None,
+        started_at: None,
+        updated_at: None,
+        source: None,
+        channels: vec![],
+    }
+}
+
+fn live_channel_health(
+    bundle: &[LiveCachedEndpoint],
+    now: DateTime<Utc>,
+) -> Vec<LiveChannelHealth> {
+    bundle
+        .iter()
+        .map(|endpoint| {
+            let age_seconds = now
+                .signed_duration_since(endpoint.fetched_at)
+                .num_milliseconds() as f64
+                / 1_000.0;
+            let age_seconds = age_seconds.max(0.0);
+            let rows = endpoint.raw.payload.as_array().map(Vec::len);
+            let has_rows = rows.unwrap_or(0) > 0;
+            let cadence_seconds = live_endpoint_cadence_seconds(&endpoint.raw.endpoint);
+            let cached_seconds = (cadence_seconds * 3.0).max(10.0);
+            let optional_empty = live_endpoint_allows_empty_payload(&endpoint.raw.endpoint);
+            let state = if endpoint.last_error.is_some() && has_rows {
+                if age_seconds <= cached_seconds {
+                    LiveChannelState::Cached
+                } else {
+                    LiveChannelState::Stale
+                }
+            } else if endpoint.last_error.is_some() {
+                LiveChannelState::Failed
+            } else if rows == Some(0) && !optional_empty {
+                LiveChannelState::Missing
+            } else if age_seconds <= cadence_seconds.max(1.0) {
+                LiveChannelState::Fresh
+            } else if age_seconds <= cached_seconds {
+                LiveChannelState::Cached
+            } else {
+                LiveChannelState::Stale
+            };
+            LiveChannelHealth {
+                endpoint: endpoint.raw.endpoint.clone(),
+                state,
+                age_seconds: Some(age_seconds),
+                rows,
+                last_error: endpoint.last_error.clone(),
+            }
+        })
+        .collect()
+}
+
+fn live_endpoint_allows_empty_payload(endpoint: &str) -> bool {
+    matches!(endpoint, "pit" | "race_control" | "session_result")
+}
+
+fn live_endpoint_links(session_key: i64) -> EndpointLinks {
+    EndpointLinks {
+        snapshot_endpoint: format!("/api/sessions/{session_key}/live/snapshot"),
+        stream_endpoint: format!("/api/sessions/{session_key}/live/stream"),
+        events_endpoint: format!("/api/sessions/{session_key}/live/events"),
+        track_geometry_endpoint: format!("/api/sessions/{session_key}/live/track/geometry"),
+    }
+}
+
+fn t_since_session_start(session: &Session, now: DateTime<Utc>) -> f64 {
+    let Ok(start) = DateTime::parse_from_rfc3339(&session.start_time) else {
+        return 0.0;
+    };
+    now.signed_duration_since(start.with_timezone(&Utc))
+        .num_milliseconds() as f64
+        / 1_000.0
+}
+
+fn session_duration(session: &Session) -> Option<f64> {
+    let start = DateTime::parse_from_rfc3339(&session.start_time)
+        .ok()?
+        .with_timezone(&Utc);
+    let end = live_session_end_or_default(start, &session.end_time);
+    Some(end.signed_duration_since(start).num_milliseconds() as f64 / 1_000.0)
+}
+
+fn live_snapshot_time_bounds(
+    session: &Session,
+    now: DateTime<Utc>,
+    latest_location_t: Option<f64>,
+) -> (f64, f64) {
+    let now_t = t_since_session_start(session, now).max(0.0);
+    let max_t = session_duration(session)
+        .unwrap_or(now_t + LIVE_FRAME_STEP_SECONDS)
+        .max(now_t);
+    let target_t = now_t - live_display_delay_seconds();
+    let snapshot_t = latest_location_t
+        .map_or(target_t, |data_t| data_t.min(target_t))
+        .max(0.0)
+        .min(max_t);
+    (snapshot_t, max_t)
+}
+
+fn live_session_window_closed(
+    session: &Session,
+    bundle: &[LiveCachedEndpoint],
+    now: DateTime<Utc>,
+) -> bool {
+    let Ok(start) = DateTime::parse_from_rfc3339(&session.start_time) else {
+        return false;
+    };
+    let start = start.with_timezone(&Utc);
+    let end = live_session_end_or_default(start, &session.end_time);
+    if now <= end + ChronoDuration::minutes(LIVE_WINDOW_PADDING_MINUTES) {
+        return false;
+    }
+    // Red flags routinely push races long past their scheduled end, so past
+    // the padded window only close once the feed has gone quiet.
+    match latest_live_row_time(bundle) {
+        Some(latest) => {
+            now.signed_duration_since(latest)
+                > ChronoDuration::minutes(LIVE_QUIET_SHUTDOWN_MINUTES)
+        }
+        None => true,
+    }
+}
+
+fn latest_live_row_time(bundle: &[LiveCachedEndpoint]) -> Option<DateTime<Utc>> {
+    bundle
+        .iter()
+        .filter_map(|endpoint| latest_row_timestamp(&endpoint.raw.payload, "date"))
+        .max()
+}
+
+fn live_session_end_or_default(start: DateTime<Utc>, end_time: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(end_time)
+        .map(|value| value.with_timezone(&Utc))
+        .ok()
+        .filter(|end| *end > start)
+        .unwrap_or_else(|| start + ChronoDuration::hours(3))
+}
+
+#[allow(dead_code)]
+fn empty_bundle(session_key: i64) -> Vec<RawEndpoint> {
+    [
+        "drivers",
+        "laps",
+        "intervals",
+        "position",
+        "location",
+        "pit",
+        "race_control",
+        "stints",
+        "weather",
+        "session_result",
+    ]
+    .into_iter()
+    .map(|endpoint| RawEndpoint {
+        endpoint: endpoint.to_string(),
+        session_key,
+        payload: Value::Array(vec![]),
+    })
+    .collect()
+}
+
