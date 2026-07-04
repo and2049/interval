@@ -847,6 +847,599 @@ async fn live_current_detects_active_sprint_sessions() {
     );
 }
 
+#[tokio::test]
+async fn openf1_live_current_start_snapshot_and_geometry_use_mocked_live_rows() {
+    let live_mock = spawn_openf1_live_mock().await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let current = get_json(app.clone(), "/api/live/current", StatusCode::OK).await;
+    assert_eq!(current["availability"], "active");
+    assert_eq!(current["active"], true);
+    assert_eq!(current["session"]["session_key"], live_mock.session_key);
+    assert_eq!(current["status"], Value::Null);
+
+    let status = post_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/start", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(status["active"], true);
+    assert_eq!(status["source"], "openf1_live");
+    assert!(status["channels"]
+        .as_array()
+        .is_some_and(|channels| channels
+            .iter()
+            .any(|channel| { channel["endpoint"] == "location" && channel["state"] == "fresh" })));
+
+    let metadata = get_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/metadata", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(metadata["contract_version"], "replay.v1");
+    assert_eq!(metadata["session"]["session_key"], live_mock.session_key);
+    assert_eq!(metadata["data_sources"][0]["name"], "openf1_live");
+
+    let snapshot = get_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/snapshot", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(snapshot["contract_version"], "replay.v1");
+    assert_eq!(snapshot["cursor"]["session_key"], live_mock.session_key);
+    assert_eq!(snapshot["timing"]["rows"][0]["driver"]["code"], "VER");
+    assert_eq!(snapshot["timing"]["rows"][0]["gap_to_leader"], Value::Null);
+    assert!(snapshot["cursor"]["t"].as_f64().is_some_and(|t| t > 0.0));
+
+    let geometry = get_json(
+        app.clone(),
+        &format!(
+            "/api/sessions/{}/live/track/geometry",
+            live_mock.session_key
+        ),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(geometry["session_key"], live_mock.session_key);
+    assert!(matches!(
+        geometry["quality"].as_str(),
+        Some("ready") | Some("schematic")
+    ));
+
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    let _ = get_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/snapshot", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    let refreshed_status = get_json(
+        app,
+        &format!("/api/sessions/{}/live/status", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(refreshed_status["started_at"], status["started_at"]);
+    let counts = live_mock.call_counts();
+    assert_eq!(counts.get("drivers").copied().unwrap_or_default(), 1);
+    assert!(counts.get("location").copied().unwrap_or_default() >= 2);
+}
+
+#[tokio::test]
+async fn openf1_live_current_returns_running_session_when_discovery_later_fails() {
+    let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
+        fail_after_first_endpoints: vec!["meetings", "sessions"],
+        ..LiveMockConfig::default()
+    })
+    .await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    post_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/start", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+
+    let current = get_json(app.clone(), "/api/live/current", StatusCode::OK).await;
+
+    assert_eq!(current["availability"], "active");
+    assert_eq!(current["active"], true);
+    assert_eq!(current["session"]["session_key"], live_mock.session_key);
+    assert_eq!(current["status"]["active"], true);
+
+    let restarted = post_json(
+        app,
+        &format!("/api/sessions/{}/live/start", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+
+    assert_eq!(restarted["active"], true);
+    assert_eq!(restarted["session_key"], live_mock.session_key);
+    let counts = live_mock.call_counts();
+    assert_eq!(counts.get("meetings").copied().unwrap_or_default(), 1);
+    assert_eq!(counts.get("sessions").copied().unwrap_or_default(), 1);
+}
+
+#[tokio::test]
+async fn openf1_live_post_session_padding_keeps_snapshot_clock_advancing() {
+    let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
+        start_offset: -ChronoDuration::minutes(70),
+        end_offset: -ChronoDuration::minutes(10),
+        ..LiveMockConfig::default()
+    })
+    .await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let current = get_json(app.clone(), "/api/live/current", StatusCode::OK).await;
+    assert_eq!(current["availability"], "active");
+
+    post_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/start", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    let metadata = get_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/metadata", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    let snapshot = get_json(
+        app,
+        &format!("/api/sessions/{}/live/snapshot", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+
+    let max_t = metadata["max_t"].as_f64().unwrap();
+    let t = snapshot["cursor"]["t"].as_f64().unwrap();
+    assert!(max_t > 3_600.0);
+    // The clock keeps advancing past the scheduled end, lagged behind the feed.
+    assert!(t > 3_600.0);
+    assert!(t <= max_t);
+}
+
+#[tokio::test]
+async fn openf1_live_start_rejects_stored_session_that_is_not_active() {
+    let live_mock = spawn_openf1_live_mock().await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let stored_meeting = crate::domain::Meeting {
+        meeting_key: 91_000,
+        year: chrono::Datelike::year(&chrono::Utc::now()),
+        name: "Stored Grand Prix".to_string(),
+        country: "Storedland".to_string(),
+        location: "Stored Circuit".to_string(),
+    };
+    let stored_session = crate::domain::Session {
+        session_key: 91_001,
+        meeting_key: stored_meeting.meeting_key,
+        year: stored_meeting.year,
+        name: "Race".to_string(),
+        session_type: crate::domain::SessionType::Race,
+        start_time: "2026-01-01T13:00:00Z".to_string(),
+        end_time: "2026-01-01T15:00:00Z".to_string(),
+        total_laps: 50,
+    };
+    storage::upsert_meetings(&pool, &[stored_meeting])
+        .await
+        .unwrap();
+    storage::upsert_sessions(&pool, &[stored_session.clone()])
+        .await
+        .unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/sessions/{}/live/start",
+                    stored_session.session_key
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload = serde_json::from_slice::<Value>(&body).unwrap();
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|message| message.contains("active OpenF1 live session")));
+}
+
+#[tokio::test]
+async fn openf1_live_degrades_when_optional_channels_are_missing() {
+    let live_mock = spawn_openf1_live_mock_with_missing(&["intervals", "race_control"]).await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let status = post_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/start", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(status["active"], true);
+    assert!(status["channels"]
+        .as_array()
+        .is_some_and(|channels| channels.iter().any(|channel| {
+            channel["endpoint"] == "intervals" && channel["state"] == "missing"
+        })));
+
+    let snapshot = get_json(
+        app,
+        &format!("/api/sessions/{}/live/snapshot", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(snapshot["contract_version"], "replay.v1");
+    assert_eq!(snapshot["cursor"]["session_key"], live_mock.session_key);
+    assert!(snapshot["timing"]["rows"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty()));
+}
+
+#[tokio::test]
+async fn openf1_live_reports_initial_endpoint_failures_in_channel_health() {
+    let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
+        failed_endpoints: vec!["weather"],
+        ..LiveMockConfig::default()
+    })
+    .await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let status = post_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/start", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+
+    let weather = status["channels"]
+        .as_array()
+        .and_then(|channels| {
+            channels
+                .iter()
+                .find(|channel| channel["endpoint"] == "weather")
+        })
+        .expect("weather health should be present");
+    assert_eq!(weather["state"], "failed");
+    assert!(weather["last_error"]
+        .as_str()
+        .is_some_and(|error| error.contains("OpenF1 live request failed")));
+
+    let snapshot = get_json(
+        app,
+        &format!("/api/sessions/{}/live/snapshot", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(snapshot["contract_version"], "replay.v1");
+}
+
+#[tokio::test]
+async fn openf1_live_keeps_last_snapshot_when_refresh_endpoint_fails() {
+    let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
+        fail_after_first_endpoints: vec!["location"],
+        ..LiveMockConfig::default()
+    })
+    .await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    post_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/start", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(650)).await;
+
+    let snapshot = get_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/snapshot", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(snapshot["contract_version"], "replay.v1");
+    assert_eq!(snapshot["cursor"]["session_key"], live_mock.session_key);
+    assert!(snapshot["track"]["positions"]
+        .as_array()
+        .is_some_and(|positions| !positions.is_empty()));
+
+    let status = get_json(
+        app,
+        &format!("/api/sessions/{}/live/status", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    let location = status["channels"]
+        .as_array()
+        .and_then(|channels| {
+            channels
+                .iter()
+                .find(|channel| channel["endpoint"] == "location")
+        })
+        .expect("location health should be present");
+    assert_eq!(location["state"], "cached");
+    assert!(location["last_error"]
+        .as_str()
+        .is_some_and(|error| error.contains("OpenF1 live request failed")));
+}
+
+#[tokio::test]
+async fn openf1_live_survives_malformed_rows_in_refresh_payload() {
+    let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
+        malformed_after_first_endpoints: vec!["location"],
+        ..LiveMockConfig::default()
+    })
+    .await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    post_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/start", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(650)).await;
+
+    let snapshot = get_json(
+        app.clone(),
+        &format!("/api/sessions/{}/live/snapshot", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(snapshot["contract_version"], "replay.v1");
+    assert_eq!(snapshot["cursor"]["session_key"], live_mock.session_key);
+    assert!(snapshot["track"]["positions"]
+        .as_array()
+        .is_some_and(|positions| !positions.is_empty()));
+
+    let status = get_json(
+        app,
+        &format!("/api/sessions/{}/live/status", live_mock.session_key),
+        StatusCode::OK,
+    )
+    .await;
+    // Malformed rows are skipped per-row instead of failing the refresh, so
+    // the session stays healthy and no refresh-failure channel appears.
+    let channels = status["channels"].as_array().unwrap();
+    assert!(!channels
+        .iter()
+        .any(|channel| channel["endpoint"] == "refresh"));
+    assert!(status["active"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn openf1_live_start_rejects_empty_initial_race_state() {
+    let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
+        missing_endpoints: vec!["drivers"],
+        ..LiveMockConfig::default()
+    })
+    .await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let payload = post_json(
+        app,
+        &format!("/api/sessions/{}/live/start", live_mock.session_key),
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("no driver data")));
+}
+
+#[tokio::test]
+async fn openf1_live_start_reports_bad_gateway_when_required_initial_endpoint_fails() {
+    let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
+        failed_endpoints: vec!["drivers"],
+        ..LiveMockConfig::default()
+    })
+    .await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let payload = post_json(
+        app,
+        &format!("/api/sessions/{}/live/start", live_mock.session_key),
+        StatusCode::BAD_GATEWAY,
+    )
+    .await;
+
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("OpenF1 live request failed")));
+}
+
+#[tokio::test]
+async fn openf1_live_start_rejects_initial_state_without_timing_data() {
+    let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
+        missing_endpoints: vec![
+            "laps",
+            "intervals",
+            "position",
+            "location",
+            "session_result",
+        ],
+        ..LiveMockConfig::default()
+    })
+    .await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+
+    let payload = post_json(
+        app,
+        &format!("/api/sessions/{}/live/start", live_mock.session_key),
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("no timing/location data")));
+}
+
 async fn seeded_router() -> Router {
     let pool = storage::connect("sqlite::memory:").await.unwrap();
     storage::migrate(&pool).await.unwrap();
