@@ -1818,6 +1818,186 @@ async fn openf1_live_stream_emits_end_when_session_stops() {
     assert!(text.contains("data: live session ended"));
 }
 
+#[tokio::test]
+async fn replay_snapshot_rejects_non_finite_time() {
+    let app = seeded_router().await;
+
+    let payload = get_json(
+        app,
+        "/api/sessions/9839/replay/snapshot?t=NaN",
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|message| message.contains("must be a finite number")));
+}
+
+#[tokio::test]
+async fn public_replay_stream_emits_v1_metadata_snapshots_events_and_end() {
+    let app = seeded_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/9839/replay/stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(text.contains("event: metadata"));
+    assert!(text.contains("event: snapshot"));
+    assert!(text.contains("event: event"));
+    assert!(text.contains("event: end"));
+    assert!(text.contains("\"contract_version\":\"replay.v1\""));
+
+    let metadata = sse_payloads(&text, "metadata");
+    assert_eq!(metadata.len(), 1);
+    assert!(metadata[0].get("track_geometry").is_some());
+    assert!(metadata[0].get("track_geometry_status").is_none());
+
+    let snapshots = sse_payloads(&text, "snapshot");
+    assert!(!snapshots.is_empty());
+    assert!(snapshots
+        .iter()
+        .all(|snapshot| snapshot.get("race_state").is_some()));
+    assert!(snapshots
+        .iter()
+        .all(|snapshot| snapshot.get("timing").is_some()));
+    assert!(snapshots
+        .iter()
+        .all(|snapshot| snapshot.get("track").is_some()));
+    assert!(snapshots
+        .iter()
+        .all(|snapshot| snapshot.get("drivers").is_none()));
+    assert!(snapshots
+        .iter()
+        .all(|snapshot| snapshot.get("positions").is_none()));
+}
+
+#[tokio::test]
+async fn public_replay_stream_starts_from_requested_frame() {
+    let app = seeded_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/9839/replay/stream?from=70&speed=16")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let snapshots = sse_payloads(&text, "snapshot");
+
+    assert_eq!(snapshots[0]["cursor"]["t"], 60.0);
+}
+
+#[tokio::test]
+async fn live_simulation_start_status_snapshot_and_stop_use_cached_replay() {
+    let app = seeded_router().await;
+
+    let start = post_json(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/start",
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(start["session_key"], 9839);
+    assert_eq!(start["active"], true);
+    assert_eq!(start["source"], "live_simulation");
+
+    let status = get_json(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/status",
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(status["active"], true);
+
+    let snapshot = get_json(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/snapshot",
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(snapshot["contract_version"], "replay.v1");
+    assert_eq!(snapshot["cursor"]["session_key"], 9839);
+
+    let stopped = post_json(
+        app,
+        "/api/sessions/9839/live-simulation/stop",
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(stopped["active"], false);
+}
+
+#[tokio::test]
+async fn live_simulation_requires_cached_replay() {
+    let app = seeded_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/9472/live-simulation/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn live_simulation_stream_emits_metadata_snapshots_and_end() {
+    let app = seeded_router().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/9839/live-simulation/start")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/9839/live-simulation/stream?speed=1000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(text.contains("event: metadata"));
+    assert!(text.contains("event: snapshot"));
+    assert!(text.contains("event: end"));
+    assert!(text.contains("\"name\":\"live_simulation\""));
+}
+
 async fn seeded_router() -> Router {
     let pool = storage::connect("sqlite::memory:").await.unwrap();
     storage::migrate(&pool).await.unwrap();
