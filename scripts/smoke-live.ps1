@@ -303,8 +303,8 @@ try {
     Invoke-RestMethod -Method Post -Uri "$backendUrl/api/sessions/$postSessionKey/live/start" | Out-Null
     $postSessionMetadata = Invoke-RestMethod -Uri "$backendUrl/api/sessions/$postSessionKey/live/metadata"
     $postSessionSnapshot = Invoke-RestMethod -Uri "$backendUrl/api/sessions/$postSessionKey/live/snapshot"
-    Assert-Equal $postSessionMetadata.max_t 3600 "post-session live metadata max_t"
-    Assert-Equal $postSessionSnapshot.cursor.t $postSessionMetadata.max_t "post-session live snapshot clamp"
+    Assert-Truthy ($postSessionMetadata.max_t -gt 3600) "post-session live metadata advances beyond scheduled duration"
+    Assert-Equal $postSessionSnapshot.cursor.t $postSessionMetadata.max_t "post-session live snapshot clock"
 
     Stop-SmokeProcess ([ref]$backendStarted)
     Stop-SmokeProcess ([ref]$mockStarted)
@@ -633,7 +633,7 @@ try {
     $stoppedStatus = Invoke-RestMethod -Uri "$backendUrl/api/sessions/$sessionKey/live/status"
     Assert-Equal $stoppedStatus.active $false "backend live status inactive after proxied stop"
 
-    Write-Output "Live smoke passed: OpenF1 mock, pre-session wait, post-session clamp, Sprint current/start/metadata/snapshot, missing date_end default duration, warmup 503 retry state, required endpoint 502 failure state, malformed refresh fallback, live diagnostic, backend live current/start/metadata/snapshot/status/events/geometry/stream/stop, and Vite proxy are healthy."
+    Write-Output "Live smoke passed: OpenF1 mock, pre-session wait, post-session clock, Sprint current/start/metadata/snapshot, missing date_end default duration, warmup 503 retry state, required endpoint 502 failure state, malformed refresh fallback, live diagnostic, backend live current/start/metadata/snapshot/status/events/geometry/stream/stop, and Vite proxy are healthy."
 } finally {
     Remove-Item Env:\INTERVAL_OPENF1_LIVE_ENABLED -ErrorAction SilentlyContinue
     Remove-Item Env:\INTERVAL_OPENF1_LIVE_BASE_URL -ErrorAction SilentlyContinue

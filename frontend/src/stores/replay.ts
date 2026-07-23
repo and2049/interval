@@ -22,6 +22,7 @@ import {
   sessionKeyAfterLiveStops,
   shouldApplyLiveResourceResult,
   shouldApplyLiveStartResult,
+  shouldApplySnapshotResult,
   shouldClearMissingHistoricalReplay,
   shouldHideHistoricalResourceError,
   shouldPollLiveAvailability,
@@ -129,8 +130,13 @@ export function createReplayStore() {
   let openF1LiveReconnectAttempts = 0;
   let openF1LiveCheckRequestId = 0;
   let openF1LiveStartRequestId = 0;
+  let liveSimulationStartRequestId = 0;
   let lastLiveAvailabilityCheck = 0;
-  let returnSessionKeyAfterLive: number | undefined;
+  let returnSessionKeyAfterLive: number | undefined = sessionKey();
+  const liveTransitioning = () =>
+    liveConnection() === "connecting"
+    || liveConnection() === "reconnecting"
+    || liveSimulationConnection() === "connecting";
 
   async function loadSnapshot(t = time()) {
     const request = snapshotRequest(sessionKey(), metadata(), t);
@@ -140,13 +146,28 @@ export function createReplayStore() {
     setSnapshotError(undefined);
     try {
       const loaded = await api.snapshot(request.key, request.t);
-      if (requestId === snapshotRequestId && loaded.cursor.session_key === sessionKey()) {
+      if (
+        shouldApplySnapshotResult(
+          requestId,
+          snapshotRequestId,
+          request.key,
+          sessionKey(),
+          liveActive(),
+          liveSimulationActive(),
+          liveTransitioning()
+        )
+        && loaded.cursor.session_key === sessionKey()
+      ) {
         setCurrentSnapshot(loaded);
       }
     } catch (error) {
-      if (requestId === snapshotRequestId) setSnapshotError(error);
+      if (shouldApplySnapshotResult(requestId, snapshotRequestId, request.key, sessionKey(), liveActive(), liveSimulationActive(), liveTransitioning())) {
+        setSnapshotError(error);
+      }
     } finally {
-      if (requestId === snapshotRequestId) setSnapshotLoading(false);
+      if (shouldApplySnapshotResult(requestId, snapshotRequestId, request.key, sessionKey(), liveActive(), liveSimulationActive(), liveTransitioning())) {
+        setSnapshotLoading(false);
+      }
     }
   }
 
@@ -182,7 +203,7 @@ export function createReplayStore() {
 
   createEffect(() => {
     const meta = activeMetadata();
-    if (meta && !playing() && !liveSimulationActive() && !liveActive()) {
+    if (meta && !playing() && !liveSimulationActive() && !liveActive() && !liveTransitioning()) {
       void loadSnapshot(time());
     }
   });
@@ -215,7 +236,7 @@ export function createReplayStore() {
 
   createEffect(() => {
     const meta = activeMetadata();
-    if (!meta || playing() || liveSimulationActive() || liveActive()) return;
+    if (!meta || playing() || liveSimulationActive() || liveActive() || liveTransitioning()) return;
     if (initializedSessionKey === meta.session.session_key) return;
     initializedSessionKey = meta.session.session_key;
     const startT = meta.race_start_t > 0 ? meta.race_start_t : meta.min_t;
@@ -241,6 +262,7 @@ export function createReplayStore() {
     setSnapshotError(undefined);
 
     source.addEventListener("snapshot", (event) => {
+      if (replayStream !== source) return;
       try {
         const snapshot = JSON.parse((event as MessageEvent).data) as ReplaySnapshot;
         if (snapshot.cursor.session_key !== sessionKey()) return;
@@ -251,11 +273,13 @@ export function createReplayStore() {
       }
     });
     source.addEventListener("error", () => {
+      if (replayStream !== source) return;
       if (source.readyState === EventSource.CLOSED) {
         setSnapshotError(new Error("Replay stream disconnected."));
       }
     });
     source.addEventListener("end", () => {
+      if (replayStream !== source) return;
       setPlaying(false);
       source.close();
       if (replayStream === source) replayStream = undefined;
@@ -278,6 +302,7 @@ export function createReplayStore() {
     setSnapshotError(undefined);
 
     source.addEventListener("metadata", (event) => {
+      if (liveStream !== source) return;
       try {
         setLiveMetadata(JSON.parse((event as MessageEvent).data));
       } catch (error) {
@@ -285,6 +310,7 @@ export function createReplayStore() {
       }
     });
     source.addEventListener("snapshot", (event) => {
+      if (liveStream !== source) return;
       try {
         const snapshot = JSON.parse((event as MessageEvent).data) as ReplaySnapshot;
         if (snapshot.cursor.session_key !== sessionKey()) return;
@@ -298,12 +324,14 @@ export function createReplayStore() {
       }
     });
     source.addEventListener("error", () => {
+      if (liveStream !== source) return;
       if (source.readyState === EventSource.CLOSED) {
         setSnapshotError(new Error("Live simulation stream disconnected."));
         setLiveSimulationConnection("disconnected");
       }
     });
     source.addEventListener("end", () => {
+      if (liveStream !== source) return;
       setLiveSimulationActive(false);
       setLiveSimulationConnection("idle");
       clearLiveRuntimeResources();
@@ -330,6 +358,7 @@ export function createReplayStore() {
     setSnapshotError(undefined);
 
     source.addEventListener("metadata", (event) => {
+      if (openF1LiveStream !== source) return;
       try {
         setLiveMetadata(JSON.parse((event as MessageEvent).data));
       } catch (error) {
@@ -337,6 +366,7 @@ export function createReplayStore() {
       }
     });
     source.addEventListener("snapshot", (event) => {
+      if (openF1LiveStream !== source) return;
       try {
         const snapshot = JSON.parse((event as MessageEvent).data) as ReplaySnapshot;
         if (snapshot.cursor.session_key !== sessionKey()) return;
@@ -345,13 +375,14 @@ export function createReplayStore() {
         setLiveConnection("connected");
         setSnapshotLoading(false);
         openF1LiveReconnectAttempts = 0;
-        void refreshOpenF1LiveStatus(snapshot.cursor.session_key);
+        void refreshOpenF1LiveStatus(snapshot.cursor.session_key, source);
       } catch (error) {
         setSnapshotError(error);
         setLiveConnection("disconnected");
       }
     });
     source.addEventListener("event", (event) => {
+      if (openF1LiveStream !== source) return;
       try {
         const replayEvent = JSON.parse((event as MessageEvent).data) as ReplayEvent;
         if (replayEvent.t <= time()) {
@@ -366,12 +397,12 @@ export function createReplayStore() {
       }
     });
     source.addEventListener("error", (event) => {
-      if (!liveActive()) return;
+      if (openF1LiveStream !== source || !liveActive()) return;
       const serverMessage = serverSentErrorMessage(event);
       if (serverMessage) {
         setSnapshotError(new Error(serverMessage));
         setSnapshotLoading(false);
-        void refreshOpenF1LiveStatus(key);
+        void refreshOpenF1LiveStatus(key, source);
         source.close();
         if (openF1LiveStream === source) openF1LiveStream = undefined;
         scheduleOpenF1LiveReconnect(serverMessage);
@@ -382,6 +413,7 @@ export function createReplayStore() {
       scheduleOpenF1LiveReconnect();
     });
     source.addEventListener("end", () => {
+      if (openF1LiveStream !== source) return;
       const returnKey = sessionKeyAfterLiveStops(sessionKey(), returnSessionKeyAfterLive);
       setLiveActive(false);
       setLiveAvailability("inactive");
@@ -407,11 +439,23 @@ export function createReplayStore() {
 
   async function startOpenF1Live(key: number): Promise<boolean> {
     const requestId = ++openF1LiveStartRequestId;
+    liveSimulationStartRequestId += 1;
+    let runtimeStarted = false;
+    const stopIfSuperseded = async () => {
+      if (shouldApplyLiveStartResult(requestId, openF1LiveStartRequestId)) return false;
+      if (runtimeStarted) {
+        runtimeStarted = false;
+        await api.liveStop(key).catch(() => undefined);
+      }
+      return true;
+    };
+
     setPlaying(false);
     if (liveSimulationActive()) {
       const simulationKey = sessionKey();
       if (simulationKey != null) await api.liveSimulationStop(simulationKey).catch(() => undefined);
     }
+    if (await stopIfSuperseded()) return false;
     setLiveSimulationActive(false);
     setLiveSimulationConnection("idle");
     liveStream?.close();
@@ -421,15 +465,23 @@ export function createReplayStore() {
     setSnapshotError(undefined);
     setSnapshotLoading(true);
     setLiveConnection("connecting");
-    returnSessionKeyAfterLive = activeMetadata()?.session.session_key;
+    returnSessionKeyAfterLive = returnSessionKeyAfterLive ?? sessionKey() ?? readStoredSessionKey();
+    snapshotRequestId += 1;
+    setCurrentSnapshot(undefined);
     try {
       await api.liveStart(key);
+      runtimeStarted = true;
+      if (await stopIfSuperseded()) return false;
       const status = await api.liveStatus(key).catch(() => undefined);
+      if (await stopIfSuperseded()) return false;
       const metadata = await api.liveMetadata(key);
+      if (await stopIfSuperseded()) return false;
       const snapshot = await api.liveSnapshot(key);
+      if (await stopIfSuperseded()) return false;
       const geometry = await api.liveTrackGeometry(key).catch(() => undefined);
+      if (await stopIfSuperseded()) return false;
       const events = await api.liveEvents(key).catch(() => undefined);
-      if (!shouldApplyLiveStartResult(requestId, openF1LiveStartRequestId)) return false;
+      if (await stopIfSuperseded()) return false;
       setSessionKey(key);
       if (status?.session_key === key) setLiveStatus(status);
       if (metadata.session.session_key === key) setLiveMetadata(metadata);
@@ -443,7 +495,7 @@ export function createReplayStore() {
       setLiveConnection("connected");
       return true;
     } catch (error) {
-      if (!shouldApplyLiveStartResult(requestId, openF1LiveStartRequestId)) return false;
+      if (await stopIfSuperseded()) return false;
       setSnapshotError(error);
       setLiveAvailability(liveAvailabilityAfterStartError(error));
       setLiveAvailabilityMessage(liveStartErrorMessage(error));
@@ -461,6 +513,7 @@ export function createReplayStore() {
 
   async function checkOpenF1Live(source: "startup" | "manual" | "poll" = "manual") {
     const requestId = ++openF1LiveCheckRequestId;
+    openF1LiveStartRequestId += 1;
     lastLiveAvailabilityCheck = performance.now();
     setLiveAvailabilityChecking(true);
     if (source !== "poll") setLiveAvailabilityMessage("Checking live race status...");
@@ -495,16 +548,16 @@ export function createReplayStore() {
     }
   }
 
-  async function refreshOpenF1LiveStatus(key: number) {
+  async function refreshOpenF1LiveStatus(key: number, source: EventSource) {
     const now = performance.now();
     if (now - lastLiveStatusRefresh < 2_000) return;
     lastLiveStatusRefresh = now;
     const status = await api.liveStatus(key).catch(() => undefined);
-    if (shouldApplyLiveResourceResult(status?.session_key, sessionKey(), liveActive())) {
+    if (openF1LiveStream === source && shouldApplyLiveResourceResult(status?.session_key, sessionKey(), liveActive())) {
       setLiveStatus(status);
     }
     const geometry = await api.liveTrackGeometry(key).catch(() => undefined);
-    if (shouldApplyLiveResourceResult(geometry?.session_key, sessionKey(), liveActive())) {
+    if (openF1LiveStream === source && shouldApplyLiveResourceResult(geometry?.session_key, sessionKey(), liveActive())) {
       setLiveGeometry(geometry);
     }
   }
@@ -636,6 +689,7 @@ export function createReplayStore() {
       stopAbandonedLiveRuntimes();
       openF1LiveCheckRequestId += 1;
       openF1LiveStartRequestId += 1;
+      liveSimulationStartRequestId += 1;
       setLiveAvailabilityChecking(false);
       setPlaying(false);
       setLiveActive(false);
@@ -662,6 +716,7 @@ export function createReplayStore() {
       stopAbandonedLiveRuntimes();
       openF1LiveCheckRequestId += 1;
       openF1LiveStartRequestId += 1;
+      liveSimulationStartRequestId += 1;
       setLiveAvailabilityChecking(false);
       setPlaying(false);
       setLiveActive(false);
@@ -674,6 +729,7 @@ export function createReplayStore() {
       setSnapshotError(undefined);
       initializedSessionKey = undefined;
       returnSessionKeyAfterLive = undefined;
+      snapshotRequestId += 1;
       openF1LiveStream?.close();
       openF1LiveStream = undefined;
       clearOpenF1LiveReconnect();
@@ -686,15 +742,40 @@ export function createReplayStore() {
       setSessionKey(key);
     },
     toggleLiveSimulation: async () => {
+      const requestId = ++liveSimulationStartRequestId;
       openF1LiveCheckRequestId += 1;
       openF1LiveStartRequestId += 1;
       setLiveAvailabilityChecking(false);
       const key = sessionKey();
       if (!key) return;
+      const isCurrent = () =>
+        shouldApplyLiveStartResult(requestId, liveSimulationStartRequestId) && sessionKey() === key;
+      let runtimeStarted = false;
+      const stopIfSuperseded = async () => {
+        if (isCurrent()) return false;
+        if (runtimeStarted) {
+          runtimeStarted = false;
+          await api.liveSimulationStop(key).catch(() => undefined);
+        }
+        return true;
+      };
+
+      if (!liveSimulationActive() && liveSimulationConnection() === "connecting") {
+        liveStream?.close();
+        liveStream = undefined;
+        await api.liveSimulationStop(key).catch(() => undefined);
+        if (await stopIfSuperseded()) return;
+        setLiveSimulationConnection("idle");
+        setSnapshotLoading(false);
+        setCurrentSnapshot(undefined);
+        return;
+      }
+
       if (liveSimulationActive()) {
         liveStream?.close();
         liveStream = undefined;
         await api.liveSimulationStop(key).catch(() => undefined);
+        if (await stopIfSuperseded()) return;
         setLiveSimulationActive(false);
         setLiveSimulationConnection("idle");
         clearLiveRuntimeResources();
@@ -713,20 +794,29 @@ export function createReplayStore() {
       setSnapshotError(undefined);
       setSnapshotLoading(true);
       setLiveSimulationConnection("connecting");
+      snapshotRequestId += 1;
+      setCurrentSnapshot(undefined);
       try {
         await api.liveSimulationStart(key);
+        runtimeStarted = true;
+        if (await stopIfSuperseded()) return;
         const snapshot = await api.liveSimulationSnapshot(key);
-        if (snapshot.cursor.session_key === sessionKey()) {
-          setCurrentSnapshot(snapshot);
-          setTime(snapshot.cursor.t);
+        if (await stopIfSuperseded()) return;
+        if (snapshot.cursor.session_key !== sessionKey()) {
+          runtimeStarted = false;
+          await api.liveSimulationStop(key).catch(() => undefined);
+          return;
         }
+        setCurrentSnapshot(snapshot);
+        setTime(snapshot.cursor.t);
         setLiveSimulationActive(true);
       } catch (error) {
+        if (await stopIfSuperseded()) return;
         setSnapshotError(error);
         setLiveSimulationConnection("disconnected");
         setLiveSimulationActive(false);
       } finally {
-        setSnapshotLoading(false);
+        if (isCurrent()) setSnapshotLoading(false);
       }
     }
   };

@@ -41,7 +41,11 @@ export default function App() {
                 snapshotError: replay.snapshot.error,
                 sessionKey: replay.sessionKey(),
                 selectedSessionLabel: selectedSessionLabel(),
-                liveStatusMessage: replay.liveAvailabilityMessage()
+                liveStatusMessage: replay.liveAvailabilityMessage(),
+                liveConnecting:
+                  replay.liveConnection() === "connecting"
+                  || replay.liveConnection() === "reconnecting"
+                  || replay.liveSimulationConnection() === "connecting"
               })}
             </div>
           </div>

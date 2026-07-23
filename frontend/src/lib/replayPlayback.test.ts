@@ -27,6 +27,7 @@ import {
   sessionKeyAfterLiveStops,
   shouldApplyLiveResourceResult,
   shouldApplyLiveStartResult,
+  shouldApplySnapshotResult,
   shouldClearMissingHistoricalReplay,
   shouldHideHistoricalResourceError,
   shouldPollLiveAvailability,
@@ -262,6 +263,17 @@ describe("replayLoadMessage", () => {
     expect(replayLoadMessage({ sessionKey: 9472 })).toBe("Connecting to replay cache...");
     expect(replayLoadMessage({ metadata: metadata(9472) })).toBe("Loading replay frame...");
   });
+
+  test("describes a live connection instead of a historical frame load", () => {
+    expect(
+      replayLoadMessage({
+        metadata: metadata(9472),
+        snapshotLoading: true,
+        liveConnecting: true,
+        liveStatusMessage: "Opening active OpenF1 live session..."
+      })
+    ).toBe("Opening active OpenF1 live session...");
+  });
 });
 
 describe("shouldClearMissingHistoricalReplay", () => {
@@ -323,6 +335,17 @@ describe("shouldApplyLiveStartResult", () => {
   test("only applies the latest live start request", () => {
     expect(shouldApplyLiveStartResult(3, 3)).toBe(true);
     expect(shouldApplyLiveStartResult(2, 3)).toBe(false);
+  });
+});
+
+describe("shouldApplySnapshotResult", () => {
+  test("rejects stale or live-mode historical snapshot results", () => {
+    expect(shouldApplySnapshotResult(3, 3, 9472, 9472, false, false)).toBe(true);
+    expect(shouldApplySnapshotResult(2, 3, 9472, 9472, false, false)).toBe(false);
+    expect(shouldApplySnapshotResult(3, 3, 9472, 9839, false, false)).toBe(false);
+    expect(shouldApplySnapshotResult(3, 3, 9472, 9472, true, false)).toBe(false);
+    expect(shouldApplySnapshotResult(3, 3, 9472, 9472, false, true)).toBe(false);
+    expect(shouldApplySnapshotResult(3, 3, 9472, 9472, false, false, true)).toBe(false);
   });
 });
 

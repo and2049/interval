@@ -994,7 +994,7 @@ async fn openf1_live_current_returns_running_session_when_discovery_later_fails(
 }
 
 #[tokio::test]
-async fn openf1_live_post_session_padding_clamps_snapshot_time() {
+async fn openf1_live_post_session_padding_keeps_snapshot_clock_advancing() {
     let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
         start_offset: -ChronoDuration::minutes(70),
         end_offset: -ChronoDuration::minutes(10),
@@ -1039,7 +1039,9 @@ async fn openf1_live_post_session_padding_clamps_snapshot_time() {
     )
     .await;
 
-    assert_eq!(metadata["max_t"], 3_600.0);
+    assert!(metadata["max_t"]
+        .as_f64()
+        .is_some_and(|max_t| max_t > 3_600.0));
     assert_eq!(snapshot["cursor"]["t"], metadata["max_t"]);
 }
 
@@ -1561,7 +1563,7 @@ async fn openf1_live_events_endpoint_returns_current_live_timeline() {
 }
 
 #[tokio::test]
-async fn openf1_live_stream_emits_metadata_snapshots_without_replaying_history() {
+async fn openf1_live_stream_replays_current_events_for_reconnect_recovery() {
     let live_mock = spawn_openf1_live_mock().await;
     let pool = storage::connect("sqlite::memory:").await.unwrap();
     storage::migrate(&pool).await.unwrap();
@@ -1590,7 +1592,11 @@ async fn openf1_live_stream_emits_metadata_snapshots_without_replaying_history()
     let text = get_sse_prefix(
         app,
         &format!("/api/sessions/{}/live/stream", live_mock.session_key),
-        |text| text.contains("event: metadata") && text.contains("event: snapshot"),
+        |text| {
+            text.contains("event: metadata")
+                && text.contains("event: snapshot")
+                && text.contains("event: event")
+        },
     )
     .await;
 
@@ -1612,7 +1618,106 @@ async fn openf1_live_stream_emits_metadata_snapshots_without_replaying_history()
         .as_array()
         .is_some_and(|rows| !rows.is_empty()));
 
-    assert!(sse_payloads(&text, "event").is_empty());
+    assert!(sse_payloads(&text, "event")
+        .iter()
+        .any(|event| event["message"] == "GREEN LIGHT"));
+}
+
+#[tokio::test]
+async fn concurrent_live_snapshot_readers_share_one_upstream_refresh() {
+    let live_mock = spawn_openf1_live_mock().await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            token: None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+    let key = live_mock.session_key;
+    post_json(
+        app.clone(),
+        &format!("/api/sessions/{key}/live/start"),
+        StatusCode::OK,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+    let before = live_mock.call_counts();
+
+    let path = format!("/api/sessions/{key}/live/snapshot");
+    let (first, second) = tokio::join!(
+        get_json(app.clone(), &path, StatusCode::OK),
+        get_json(app, &path, StatusCode::OK)
+    );
+    assert_eq!(first["cursor"]["session_key"], key);
+    assert_eq!(second["cursor"]["session_key"], key);
+
+    let after = live_mock.call_counts();
+    assert_eq!(after["position"] - before["position"], 1);
+    assert_eq!(after["location"] - before["location"], 1);
+}
+
+#[tokio::test]
+async fn stopping_during_refresh_does_not_resurrect_live_session() {
+    let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
+        slow_after_first_endpoints: vec!["location"],
+        ..LiveMockConfig::default()
+    })
+    .await;
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            base_url: live_mock.base_url.clone(),
+            token: None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let app = router(AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    ));
+    let key = live_mock.session_key;
+    post_json(
+        app.clone(),
+        &format!("/api/sessions/{key}/live/start"),
+        StatusCode::OK,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+
+    let snapshot_app = app.clone();
+    let snapshot_path = format!("/api/sessions/{key}/live/snapshot");
+    let refreshing =
+        tokio::spawn(
+            async move { get_json(snapshot_app, &snapshot_path, StatusCode::NOT_FOUND).await },
+        );
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let stopped = post_json(
+        app.clone(),
+        &format!("/api/sessions/{key}/live/stop"),
+        StatusCode::OK,
+    )
+    .await;
+
+    assert!(!stopped["active"].as_bool().unwrap());
+    refreshing.await.unwrap();
+    let status = get_json(
+        app,
+        &format!("/api/sessions/{key}/live/status"),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(status["active"], false);
 }
 
 #[tokio::test]
@@ -1960,6 +2065,7 @@ struct LiveMockConfig {
     fail_after_first_endpoints: Vec<&'static str>,
     malformed_after_first_endpoints: Vec<&'static str>,
     delayed_endpoints: Vec<&'static str>,
+    slow_after_first_endpoints: Vec<&'static str>,
 }
 
 impl Default for LiveMockConfig {
@@ -1974,6 +2080,7 @@ impl Default for LiveMockConfig {
             fail_after_first_endpoints: vec![],
             malformed_after_first_endpoints: vec![],
             delayed_endpoints: vec![],
+            slow_after_first_endpoints: vec![],
         }
     }
 }
@@ -2005,6 +2112,7 @@ async fn spawn_openf1_live_mock_with_config(config: LiveMockConfig) -> LiveMock 
             .copied()
             .collect(),
         delayed_endpoints: config.delayed_endpoints.iter().copied().collect(),
+        slow_after_first_endpoints: config.slow_after_first_endpoints.iter().copied().collect(),
     });
     let app = Router::new()
         .route("/v1/meetings", get(mock_meetings))
@@ -2049,6 +2157,7 @@ struct LiveMockPayload {
     fail_after_first_endpoints: std::collections::HashSet<&'static str>,
     malformed_after_first_endpoints: std::collections::HashSet<&'static str>,
     delayed_endpoints: std::collections::HashSet<&'static str>,
+    slow_after_first_endpoints: std::collections::HashSet<&'static str>,
 }
 
 impl LiveMockPayload {
@@ -2070,6 +2179,12 @@ impl LiveMockPayload {
 
     fn is_malformed_after_first(&self, endpoint: &'static str) -> bool {
         self.malformed_after_first_endpoints.contains(endpoint) && self.call_count(endpoint) > 1
+    }
+
+    async fn maybe_delay_after_first(&self, endpoint: &'static str) {
+        if self.slow_after_first_endpoints.contains(endpoint) && self.call_count(endpoint) > 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     fn maybe_fail(&self, endpoint: &'static str) -> Result<(), HttpStatusCode> {
@@ -2184,6 +2299,7 @@ async fn mock_location(
     axum::extract::State(payload): axum::extract::State<std::sync::Arc<LiveMockPayload>>,
 ) -> Result<Json<Value>, HttpStatusCode> {
     payload.record("location");
+    payload.maybe_delay_after_first("location").await;
     payload.maybe_fail("location")?;
     if payload.is_missing("location") {
         return Ok(Json(json!([])));

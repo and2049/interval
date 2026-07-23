@@ -122,14 +122,8 @@ pub async fn stream(
     let pool = state.pool.clone();
     let frame_delay = Duration::from_secs_f64(metadata.frame_step_seconds.max(0.25));
     let initial_t = status.current_t.unwrap_or(0.0);
-    let initial_event_ids = state
-        .live
-        .events(session_key)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|event| event.id)
-        .collect::<HashSet<_>>();
+    // Re-send the small event history on reconnect; clients dedupe by event id.
+    let initial_event_ids = HashSet::new();
 
     let snapshots = stream::unfold(
         (initial_t, false, initial_event_ids),

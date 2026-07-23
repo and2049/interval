@@ -9,11 +9,16 @@ use reqwest::{
     Url,
 };
 use serde_json::Value;
-use std::time::Duration;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 const DEFAULT_BASE_URL: &str = "https://api.openf1.org/v1/";
 const OPENF1_LIVE_REQUEST_TIMEOUT_SECONDS: u64 = 10;
+const OPENF1_LIVE_REQUEST_INTERVAL_MS: u64 = 100;
 const LIVE_WINDOW_PADDING_MINUTES: i64 = 30;
 const LIVE_ENDPOINTS: &[LiveEndpointSpec] = &[
     LiveEndpointSpec {
@@ -73,6 +78,12 @@ pub struct OpenF1LiveClient {
     http: reqwest::Client,
     config: OpenF1LiveConfig,
     config_error: Option<String>,
+    request_limiter: Arc<Mutex<LiveRequestLimiter>>,
+}
+
+#[derive(Debug, Default)]
+struct LiveRequestLimiter {
+    next_request: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +152,7 @@ impl OpenF1LiveClient {
                 auth_header,
             },
             config_error,
+            request_limiter: Arc::new(Mutex::new(LiveRequestLimiter::default())),
         }
     }
 
@@ -151,6 +163,7 @@ impl OpenF1LiveClient {
             http: live_http_client(),
             config,
             config_error: None,
+            request_limiter: Arc::new(Mutex::new(LiveRequestLimiter::default())),
         }
     }
 
@@ -160,6 +173,7 @@ impl OpenF1LiveClient {
             http: live_http_client(),
             config,
             config_error: Some(error.into()),
+            request_limiter: Arc::new(Mutex::new(LiveRequestLimiter::default())),
         }
     }
 
@@ -201,11 +215,27 @@ impl OpenF1LiveClient {
         let meetings_payload = self
             .fetch_endpoint("meetings", &[("year".to_string(), year.to_string())])
             .await?;
-        let meetings = normalization::meetings_from_openf1(meetings_payload)?;
+        let mut meetings = normalization::meetings_from_openf1(meetings_payload)?;
         let sessions_payload = self
             .fetch_endpoint("sessions", &[("year".to_string(), year.to_string())])
             .await?;
-        let sessions = normalization::race_sessions_from_openf1(sessions_payload)?;
+        let mut sessions = normalization::race_sessions_from_openf1(sessions_payload)?;
+
+        if next_live_session_from_schedule(&sessions, &meetings, now).is_none()
+            && chrono::Datelike::month(&now) >= 11
+        {
+            let next_year = year + 1;
+            let next_meetings = self
+                .fetch_endpoint("meetings", &[("year".to_string(), next_year.to_string())])
+                .await;
+            let next_sessions = self
+                .fetch_endpoint("sessions", &[("year".to_string(), next_year.to_string())])
+                .await;
+            if let (Ok(meetings_payload), Ok(sessions_payload)) = (next_meetings, next_sessions) {
+                meetings.extend(normalization::meetings_from_openf1(meetings_payload)?);
+                sessions.extend(normalization::race_sessions_from_openf1(sessions_payload)?);
+            }
+        }
 
         Ok(LiveSessionDiscovery {
             current: current_live_session_from_schedule(&sessions, &meetings, now),
@@ -293,6 +323,7 @@ impl OpenF1LiveClient {
                 .map(|(key, value)| (key.as_str(), value.as_str())),
         );
 
+        self.request_limiter.lock().await.wait_turn().await;
         let response = self
             .http
             .get(url)
@@ -327,6 +358,21 @@ impl OpenF1LiveClient {
             return Err(OpenF1LiveError::Config(error.clone()));
         }
         Ok(())
+    }
+}
+
+impl LiveRequestLimiter {
+    async fn wait_turn(&mut self) {
+        let interval = if cfg!(test) {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(OPENF1_LIVE_REQUEST_INTERVAL_MS)
+        };
+        let now = Instant::now();
+        if let Some(next) = self.next_request.filter(|next| *next > now) {
+            tokio::time::sleep(next.duration_since(now)).await;
+        }
+        self.next_request = Some(Instant::now() + interval);
     }
 }
 

@@ -151,7 +151,11 @@ export function replayLoadMessage(options: {
   sessionKey?: number;
   selectedSessionLabel?: string;
   liveStatusMessage?: string;
+  liveConnecting?: boolean;
 }): string {
+  if (options.liveConnecting) {
+    return options.liveStatusMessage?.trim() || "Connecting to live session...";
+  }
   if (options.metadataLoading && !options.metadata) return "Connecting to replay cache...";
   if (options.snapshotLoading && options.metadata) return "Loading replay frame...";
   if (options.metadataError) {
@@ -195,6 +199,22 @@ export function shouldApplyLiveStartResult(
   latestRequestId: number
 ): boolean {
   return requestId === latestRequestId;
+}
+
+export function shouldApplySnapshotResult(
+  requestId: number,
+  latestRequestId: number,
+  requestedSessionKey: number,
+  currentSessionKey: number | undefined,
+  liveActive: boolean,
+  liveSimulationActive: boolean,
+  liveTransitioning = false
+): boolean {
+  return requestId === latestRequestId
+    && requestedSessionKey === currentSessionKey
+    && !liveActive
+    && !liveSimulationActive
+    && !liveTransitioning;
 }
 
 export function shouldApplyLiveResourceResult(

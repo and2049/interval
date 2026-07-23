@@ -16,8 +16,11 @@ use futures_util::future::join_all;
 use serde_json::Value;
 use sqlx::SqlitePool;
 use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 use tokio::sync::Mutex;
 
@@ -30,10 +33,13 @@ const DEFAULT_LIVE_ENDPOINT_ROW_LIMIT: usize = 10_000;
 pub struct OpenF1LiveRegistry {
     client: OpenF1LiveClient,
     sessions: Arc<Mutex<HashMap<i64, OpenF1LiveSession>>>,
+    refresh_gate: Arc<Mutex<()>>,
+    lifecycle: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone)]
 struct OpenF1LiveSession {
+    generation: u64,
     session: Session,
     meeting: Option<Meeting>,
     metadata: ReplayMetadata,
@@ -49,6 +55,8 @@ struct OpenF1LiveSession {
 struct LiveCachedEndpoint {
     raw: RawEndpoint,
     fetched_at: DateTime<Utc>,
+    attempted_at: DateTime<Utc>,
+    failure_count: u32,
     last_error: Option<String>,
 }
 
@@ -57,6 +65,8 @@ impl OpenF1LiveRegistry {
         Self {
             client,
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            refresh_gate: Arc::new(Mutex::new(())),
+            lifecycle: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -146,11 +156,19 @@ impl OpenF1LiveRegistry {
             return Ok(status_from_session(&active, true));
         }
 
+        let generation = self.lifecycle.fetch_add(1, Ordering::SeqCst) + 1;
+        let _refresh = self.refresh_gate.lock().await;
+        if self.lifecycle.load(Ordering::SeqCst) != generation {
+            anyhow::bail!("OpenF1 live start was cancelled");
+        }
         let session = live_session(pool, &self.client, session_key).await?;
         let meeting = storage::get_meeting(pool, session.meeting_key).await?;
         let live_session = self
-            .refresh_live_session(pool, session, meeting, None, None)
+            .refresh_live_session(pool, session, meeting, None, None, generation)
             .await?;
+        if self.lifecycle.load(Ordering::SeqCst) != generation {
+            anyhow::bail!("OpenF1 live start was cancelled");
+        }
         let status = status_from_session(&live_session, true);
         let mut sessions = self.sessions.lock().await;
         sessions.retain(|key, _| *key == session_key);
@@ -159,6 +177,7 @@ impl OpenF1LiveRegistry {
     }
 
     pub async fn stop(&self, session_key: i64) -> LiveSessionStatus {
+        self.lifecycle.fetch_add(1, Ordering::SeqCst);
         self.sessions
             .lock()
             .await
@@ -180,12 +199,16 @@ impl OpenF1LiveRegistry {
         pool: &SqlitePool,
         session_key: i64,
     ) -> anyhow::Result<Option<ReplaySnapshot>> {
+        let _refresh = self.refresh_gate.lock().await;
         let Some(existing) = self.sessions.lock().await.get(&session_key).cloned() else {
             return Ok(None);
         };
         if live_session_window_closed(&existing.session, Utc::now()) {
             self.sessions.lock().await.remove(&session_key);
             return Ok(None);
+        }
+        if live_session_refresh_is_fresh(&existing, Utc::now()) {
+            return Ok(Some(existing.snapshot));
         }
         let refreshed = match self
             .refresh_live_session(
@@ -194,14 +217,22 @@ impl OpenF1LiveRegistry {
                 existing.meeting.clone(),
                 Some(existing.raw_bundle.clone()),
                 Some(existing.started_at.clone()),
+                existing.generation,
             )
             .await
         {
             Ok(refreshed) => refreshed,
             Err(error) => live_session_with_refresh_error(existing, error),
         };
+        let mut sessions = self.sessions.lock().await;
+        let Some(current) = sessions.get(&session_key) else {
+            return Ok(None);
+        };
+        if current.generation != refreshed.generation {
+            return Ok(Some(current.snapshot.clone()));
+        }
         let snapshot = refreshed.snapshot.clone();
-        self.sessions.lock().await.insert(session_key, refreshed);
+        sessions.insert(session_key, refreshed);
         Ok(Some(snapshot))
     }
 
@@ -271,6 +302,7 @@ impl OpenF1LiveRegistry {
         meeting: Option<Meeting>,
         previous_bundle: Option<Vec<LiveCachedEndpoint>>,
         previous_started_at: Option<String>,
+        generation: u64,
     ) -> anyhow::Result<OpenF1LiveSession> {
         let raw_bundle = self
             .fetch_cadenced_live_bundle(session.session_key, previous_bundle)
@@ -311,6 +343,7 @@ impl OpenF1LiveRegistry {
 
         let timestamp = Utc::now().to_rfc3339();
         Ok(OpenF1LiveSession {
+            generation,
             session,
             meeting,
             metadata,
@@ -340,6 +373,8 @@ impl OpenF1LiveRegistry {
                         Ok(raw) => LiveCachedEndpoint {
                             raw,
                             fetched_at,
+                            attempted_at: fetched_at,
+                            failure_count: 0,
                             last_error: None,
                         },
                         Err(error) => LiveCachedEndpoint {
@@ -349,6 +384,8 @@ impl OpenF1LiveRegistry {
                                 payload: Value::Array(vec![]),
                             },
                             fetched_at,
+                            attempted_at: fetched_at,
+                            failure_count: 1,
                             last_error: Some(error.to_string()),
                         },
                     }
@@ -367,8 +404,8 @@ impl OpenF1LiveRegistry {
             let client = self.client.clone();
             let previous = previous_by_endpoint.remove(spec.name);
             let is_fresh = previous.as_ref().is_some_and(|endpoint| {
-                now.signed_duration_since(endpoint.fetched_at)
-                    < ChronoDuration::milliseconds(spec.cadence_ms)
+                now.signed_duration_since(endpoint.attempted_at)
+                    < live_retry_delay(spec.cadence_ms, endpoint.failure_count)
             });
 
             async move {
@@ -379,7 +416,7 @@ impl OpenF1LiveRegistry {
                 let since = previous
                     .as_ref()
                     .map(|endpoint| live_incremental_since(endpoint, spec.incremental_field));
-                let mut fetched = match since {
+                let fetched = match since {
                     Some(since) => {
                         client
                             .fetch_live_bundle_endpoint_since(session_key, spec.name, since)
@@ -390,23 +427,27 @@ impl OpenF1LiveRegistry {
                             .fetch_live_bundle_endpoint(session_key, spec.name)
                             .await
                     }
-                }
-                .map(|raw| LiveCachedEndpoint {
-                    raw: merge_live_payload(previous.as_ref().map(|endpoint| &endpoint.raw), raw),
-                    fetched_at: Utc::now(),
-                    last_error: None,
-                });
+                };
 
-                if let Err(error) = fetched {
-                    if let Some(mut endpoint) = previous {
-                        endpoint.last_error = Some(error.to_string());
-                        fetched = Ok(endpoint);
-                    } else {
-                        fetched = Err(error);
+                match fetched {
+                    Ok(raw) => Ok(LiveCachedEndpoint {
+                        raw: merge_live_payload(previous.map(|endpoint| endpoint.raw), raw),
+                        fetched_at: Utc::now(),
+                        attempted_at: Utc::now(),
+                        failure_count: 0,
+                        last_error: None,
+                    }),
+                    Err(error) => {
+                        if let Some(mut endpoint) = previous {
+                            endpoint.attempted_at = Utc::now();
+                            endpoint.failure_count = endpoint.failure_count.saturating_add(1);
+                            endpoint.last_error = Some(error.to_string());
+                            Ok(endpoint)
+                        } else {
+                            Err(error.into())
+                        }
                     }
                 }
-
-                fetched.map_err(Into::into)
             }
         });
 
@@ -414,30 +455,47 @@ impl OpenF1LiveRegistry {
     }
 }
 
-fn merge_live_payload(previous: Option<&RawEndpoint>, mut fetched: RawEndpoint) -> RawEndpoint {
+fn merge_live_payload(previous: Option<RawEndpoint>, mut fetched: RawEndpoint) -> RawEndpoint {
     let Some(previous) = previous else {
         return fetched;
     };
-    let (Some(previous_rows), Some(fetched_rows)) =
-        (previous.payload.as_array(), fetched.payload.as_array_mut())
-    else {
+    let Value::Array(mut rows) = previous.payload else {
+        return fetched;
+    };
+    let Value::Array(fetched_rows) = fetched.payload else {
         return fetched;
     };
 
-    let mut seen = previous_rows
+    let mut indexes = rows
         .iter()
-        .filter_map(|row| serde_json::to_string(row).ok())
-        .collect::<HashSet<_>>();
-    let mut rows = previous_rows.clone();
-    rows.extend(
-        fetched_rows
-            .iter()
-            .filter(|row| serde_json::to_string(row).is_ok_and(|key| seen.insert(key)))
-            .cloned(),
-    );
+        .enumerate()
+        .filter_map(|(index, row)| live_row_key(row).map(|key| (key, index)))
+        .collect::<HashMap<_, _>>();
+    for row in fetched_rows {
+        let Some(key) = live_row_key(&row) else {
+            continue;
+        };
+        if let Some(index) = indexes.get(&key).copied() {
+            rows[index] = row;
+        } else {
+            indexes.insert(key, rows.len());
+            rows.push(row);
+        }
+    }
     trim_live_payload_rows(&fetched.endpoint, &mut rows);
     fetched.payload = Value::Array(rows);
     fetched
+}
+
+fn live_row_key(row: &Value) -> Option<String> {
+    if let Some(date) = row.get("date").and_then(Value::as_str) {
+        let driver = row
+            .get("driver_number")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        return Some(format!("{driver}:{date}"));
+    }
+    serde_json::to_string(row).ok()
 }
 
 fn live_session_with_refresh_error(
@@ -451,10 +509,26 @@ fn live_session_with_refresh_error(
             payload: Value::Array(vec![]),
         },
         fetched_at: Utc::now(),
+        attempted_at: Utc::now(),
+        failure_count: 1,
         last_error: Some(format!("OpenF1 live refresh failed: {error}")),
     });
     session.updated_at = Utc::now().to_rfc3339();
     session
+}
+
+fn live_retry_delay(cadence_ms: i64, failure_count: u32) -> ChronoDuration {
+    let multiplier = 1_i64 << failure_count.min(5);
+    ChronoDuration::milliseconds((cadence_ms * multiplier).min(30_000))
+}
+
+fn live_session_refresh_is_fresh(session: &OpenF1LiveSession, now: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(&session.updated_at)
+        .map(|updated| {
+            now.signed_duration_since(updated.with_timezone(&Utc))
+                < ChronoDuration::milliseconds((LIVE_FRAME_STEP_SECONDS * 1_000.0) as i64)
+        })
+        .unwrap_or(false)
 }
 
 fn live_incremental_since(
@@ -636,7 +710,11 @@ fn live_channel_health(
             let cached_seconds = (cadence_seconds * 3.0).max(10.0);
             let optional_empty = live_endpoint_allows_empty_payload(&endpoint.raw.endpoint);
             let state = if endpoint.last_error.is_some() && has_rows {
-                LiveChannelState::Cached
+                if age_seconds <= cached_seconds {
+                    LiveChannelState::Cached
+                } else {
+                    LiveChannelState::Stale
+                }
             } else if endpoint.last_error.is_some() {
                 LiveChannelState::Failed
             } else if rows == Some(0) && !optional_empty {
@@ -691,7 +769,9 @@ fn session_duration(session: &Session) -> Option<f64> {
 
 fn live_snapshot_time_bounds(session: &Session, now: DateTime<Utc>) -> (f64, f64) {
     let now_t = t_since_session_start(session, now).max(0.0);
-    let max_t = session_duration(session).unwrap_or(now_t + LIVE_FRAME_STEP_SECONDS);
+    let max_t = session_duration(session)
+        .unwrap_or(now_t + LIVE_FRAME_STEP_SECONDS)
+        .max(now_t);
     (now_t.min(max_t), max_t)
 }
 
@@ -749,6 +829,8 @@ mod tests {
                 payload: serde_json::json!([{ "driver_number": 1 }]),
             },
             fetched_at: Utc::now() - ChronoDuration::seconds(2),
+            attempted_at: Utc::now(),
+            failure_count: 1,
             last_error: Some("OpenF1 live request failed".to_string()),
         };
 
@@ -763,6 +845,34 @@ mod tests {
     }
 
     #[test]
+    fn channel_health_marks_old_failed_payload_as_stale() {
+        let now = Utc::now();
+        let endpoint = LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "location".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([{ "driver_number": 1 }]),
+            },
+            fetched_at: now - ChronoDuration::seconds(30),
+            attempted_at: now,
+            failure_count: 3,
+            last_error: Some("OpenF1 live request failed".to_string()),
+        };
+
+        assert_eq!(
+            live_channel_health(&[endpoint], now)[0].state,
+            LiveChannelState::Stale
+        );
+    }
+
+    #[test]
+    fn failed_endpoint_retries_back_off_to_thirty_seconds() {
+        assert_eq!(live_retry_delay(500, 1), ChronoDuration::seconds(1));
+        assert_eq!(live_retry_delay(500, 6), ChronoDuration::seconds(16));
+        assert_eq!(live_retry_delay(2_000, 6), ChronoDuration::seconds(30));
+    }
+
+    #[test]
     fn channel_health_clamps_negative_age_to_zero() {
         let now = Utc::now();
         let endpoint = LiveCachedEndpoint {
@@ -772,6 +882,8 @@ mod tests {
                 payload: serde_json::json!([{ "driver_number": 1 }]),
             },
             fetched_at: now + ChronoDuration::seconds(1),
+            attempted_at: now,
+            failure_count: 0,
             last_error: None,
         };
 
@@ -791,6 +903,8 @@ mod tests {
                 payload: serde_json::json!([{ "driver_number": 1 }]),
             },
             fetched_at: now - ChronoDuration::seconds(20),
+            attempted_at: now,
+            failure_count: 0,
             last_error: None,
         };
         let old_weather_endpoint = LiveCachedEndpoint {
@@ -800,6 +914,8 @@ mod tests {
                 payload: serde_json::json!([{ "air_temperature": 22.0 }]),
             },
             fetched_at: now - ChronoDuration::seconds(45),
+            attempted_at: now,
+            failure_count: 0,
             last_error: None,
         };
 
@@ -819,6 +935,8 @@ mod tests {
                 payload: serde_json::json!([]),
             },
             fetched_at: now,
+            attempted_at: now,
+            failure_count: 0,
             last_error: None,
         };
         let empty_driver_endpoint = LiveCachedEndpoint {
@@ -828,6 +946,8 @@ mod tests {
                 payload: serde_json::json!([]),
             },
             fetched_at: now,
+            attempted_at: now,
+            failure_count: 0,
             last_error: None,
         };
 
@@ -856,7 +976,7 @@ mod tests {
             ]),
         };
 
-        let merged = merge_live_payload(Some(&previous), fetched);
+        let merged = merge_live_payload(Some(previous), fetched);
 
         let rows = merged.payload.as_array().unwrap();
         assert_eq!(rows.len(), 2);
@@ -883,7 +1003,7 @@ mod tests {
             payload: Value::Array(fetched_rows),
         };
 
-        let merged = merge_live_payload(Some(&previous), fetched);
+        let merged = merge_live_payload(Some(previous), fetched);
 
         let rows = merged.payload.as_array().unwrap();
         assert_eq!(rows.len(), 1_000);
@@ -906,6 +1026,8 @@ mod tests {
                 ]),
             },
             fetched_at,
+            attempted_at: fetched_at,
+            failure_count: 0,
             last_error: None,
         };
 
@@ -926,6 +1048,8 @@ mod tests {
                 payload: serde_json::json!([{ "driver_number": 1 }]),
             },
             fetched_at,
+            attempted_at: fetched_at,
+            failure_count: 0,
             last_error: None,
         };
 
@@ -953,8 +1077,8 @@ mod tests {
 
         let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now);
 
-        assert_eq!(max_t, 7_200.0);
-        assert_eq!(snapshot_t, max_t);
+        assert_eq!(max_t, 8_400.0);
+        assert_eq!(snapshot_t, 8_400.0);
     }
 
     #[test]
