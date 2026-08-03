@@ -23,7 +23,7 @@ The architecture currently supports three data modes:
 - **Backend:** Rust.
 - **Frontend:** SolidJS.
 - **Styling:** Tailwind CSS.
-- **App shape:** Web app, not Electron by default.
+- **App shape:** Web app first; a thin Electron shell in `desktop/` wraps the same backend and built frontend for desktop use.
 - **Delivery model:** Live/replay contract-first.
 
 ## Product principles
@@ -39,7 +39,7 @@ The architecture currently supports three data modes:
 
 Unless explicitly requested, do not optimize for:
 
-- Native desktop packaging.
+- Auto-update, code signing, and notarization for the desktop build.
 - Mobile parity for every panel in early phases.
 - User accounts, auth, or social features.
 - ML-heavy prediction systems.
@@ -52,6 +52,7 @@ Preferred top-level structure:
 ```text
 backend/
 frontend/
+desktop/
 shared/
 docs/
 infra/

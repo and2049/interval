@@ -76,6 +76,11 @@ fn load_asset_geometry(session_key: i64) -> Option<TrackGeometry> {
         return None;
     }
     let rotation = asset.rotation_deg.unwrap_or(0.0);
+    tracing::info!(
+        path = %path,
+        points = asset.centerline.len(),
+        "loaded curated track asset"
+    );
     Some(build_geometry(session_key, &asset.centerline, rotation))
 }
 

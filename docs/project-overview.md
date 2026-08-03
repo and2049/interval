@@ -75,7 +75,7 @@ The interface should be optimized for **quick scanning**. Users should be able t
 - Real-world live validation outside active OpenF1 live session windows.
 - Mobile-first or mobile-parity support for all dense panels.
 - Social features, accounts, or cloud sync.
-- Native desktop packaging.
+- Auto-update, code signing, and notarization for the desktop build.
 - Complex predictive models that require heavy ML infrastructure.
 
 ## Technical Direction
@@ -85,7 +85,7 @@ The interface should be optimized for **quick scanning**. Users should be able t
 - **Backend:** Rust.
 - **Frontend:** SolidJS.
 - **Styling/UI:** Tailwind CSS.
-- **Primary app type:** Web app.
+- **Primary app type:** Web app, with an Electron shell for desktop delivery.
 - **Data mode:** Live/replay contract-first.
 
 This stack is intended to balance performance, type safety, and a lightweight client. SolidJS is a good fit for a dashboard with many small, frequently updating UI regions, while Rust supports strong domain modeling, efficient replay processing, and live-ingestion services.
@@ -96,7 +96,7 @@ This stack is intended to balance performance, type safety, and a lightweight cl
 - Separate raw data ingestion from normalized internal domain models.
 - Treat replay mode, live simulation, and OpenF1 live mode as inputs into the same application model.
 - Optimize for incremental rendering and fast screen updates.
-- Prefer simple deployable web architecture before exploring desktop or TUI variants.
+- Prefer simple deployable web architecture; the desktop shell reuses that architecture rather than forking it, by serving the same built frontend from the same backend.
 
 ## Proposed System Structure
 

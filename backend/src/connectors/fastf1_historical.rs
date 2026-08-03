@@ -18,6 +18,15 @@ const DEFAULT_CACHE_DIR: &str = "cache/fastf1";
 const DEFAULT_VENV_DIR: &str = "cache/fastf1-venv";
 const READY_SENTINEL: &str = ".interval-fastf1-ready";
 
+/// Most macOS and Linux installs expose only `python3`; Windows uses `python`.
+fn default_bootstrap_python() -> &'static str {
+    if cfg!(windows) {
+        "python"
+    } else {
+        "python3"
+    }
+}
+
 #[derive(Clone)]
 pub struct FastF1HistoricalClient {
     root: PathBuf,
@@ -35,7 +44,7 @@ impl Default for FastF1HistoricalClient {
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
             bootstrap_python: std::env::var("INTERVAL_FASTF1_BOOTSTRAP_PYTHON")
-                .unwrap_or_else(|_| "python".to_string()),
+                .unwrap_or_else(|_| default_bootstrap_python().to_string()),
             timeout: Duration::from_secs(
                 std::env::var("INTERVAL_FASTF1_TIMEOUT_SECONDS")
                     .ok()

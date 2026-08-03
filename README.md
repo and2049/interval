@@ -8,6 +8,7 @@ The app uses one backend-owned `replay.v1` snapshot contract for OpenF1-backed l
 
 - `backend/`: Rust API service with Axum, SQLite, FastF1 historical ingest, OpenF1 discovery/live polling, replay generation, track geometry, and SSE streaming.
 - `frontend/`: SolidJS, TypeScript, Vite, and Tailwind dashboard.
+- `desktop/`: Electron shell that runs the backend as a child process and loads the built dashboard from it.
 - `shared/`: public replay API contract docs and TypeScript wire types.
 - `infra/`: early deployment notes.
 - `docs/`: local reference notes and inspiration material; this directory is ignored by Git in this workspace.
@@ -49,6 +50,20 @@ bun run dev
 
 The Vite dev server proxies `/api` to the backend.
 
+Desktop shell (optional, two terminals total):
+
+```bash
+# terminal 1
+cargo run -p interval-backend
+
+# terminal 2
+cd desktop
+bun install
+bun run dev
+```
+
+`bun run dev` in `desktop/` starts Vite and Electron together and stops both when either exits. It deliberately does not start the backend, so cargo rebuilds and backend logs stay in their own terminal. The window loads the Vite dev server, so frontend hot reload works exactly as it does in a browser. Launch order does not matter; the window retries until a server answers.
+
 Useful checks:
 
 ```bash
@@ -68,7 +83,9 @@ Backend environment variables:
 - `INTERVAL_BIND`: backend bind address, defaults to `127.0.0.1:4000`.
 - `INTERVAL_REBUILD_SESSION_ON_START`: optional session key to rebuild replay artifacts from cached raw historical data during backend startup. The smoke script uses `9472`.
 - `INTERVAL_FASTF1_PYTHON`: optional Python executable with FastF1 dependencies already installed. If omitted, the backend creates `cache/fastf1-venv` and installs `scripts/fastf1-requirements.txt` on first FastF1 ingest.
-- `INTERVAL_FASTF1_BOOTSTRAP_PYTHON`: optional Python executable used to create the managed FastF1 venv. Defaults to `python`.
+- `INTERVAL_FASTF1_BOOTSTRAP_PYTHON`: optional Python executable used to create the managed FastF1 venv. Defaults to `python` on Windows and `python3` elsewhere.
+- `INTERVAL_STATIC_DIR`: optional directory containing a built frontend (`index.html` plus `assets/`). When set, the backend serves it from the same origin as the API, so the dashboard and its SSE streams need no separate web server. Declared routes always win over static files, and startup fails immediately if the directory has no `index.html`. Unset for the web deployment and for local dev, where Vite serves the UI; the desktop shell sets it.
+- `INTERVAL_SHUTDOWN_ON_STDIN_EOF`: when set, the backend also shuts down gracefully once its standard input reaches end-of-file. This lets a supervising process stop it by closing the pipe, and guarantees it exits if that parent dies. Unset for normal terminal and deployment runs, where Ctrl-C is the only shutdown trigger; the desktop shell sets it.
 - `INTERVAL_OPENF1_LIVE_ENABLED`: OpenF1 live discovery and polling are enabled by default; set to `false`, `0`, `no`, or `off` to disable them for offline/dev runs.
 - `INTERVAL_OPENF1_LIVE_BASE_URL`: optional OpenF1-compatible live API base URL, defaults to `https://api.openf1.org/v1/`.
 - `INTERVAL_OPENF1_LIVE_TOKEN`: optional server-side live API token. With the default `Authorization` header, either `abc123` or `Bearer abc123` is accepted.
@@ -87,6 +104,38 @@ Smoke script parameters:
 - `-TimeoutSeconds`: health-check and stream-read timeout.
 - `-SessionKey`, `-MeetingKey`, `-ExpectedMeetingName`, and `-SnapshotT`: cached replay target. Defaults cover Bahrain `9472`.
 - `-ExpectedMapMode`, `-ExpectedTrackQuality`, `-ExpectedGeometrySource`, and `-MinimumTimingRows`: target-specific replay quality assertions. Defaults match the Bahrain curated/projected fallback.
+
+## Desktop App
+
+The desktop build is an Electron shell around the same backend and the same built frontend. The backend serves the dashboard over `INTERVAL_STATIC_DIR`, so the renderer stays same-origin and no frontend code differs between web and desktop.
+
+Build an installer for the current platform:
+
+```bash
+cd desktop
+bun install
+bun run dist
+```
+
+That runs, in order: `cargo build --release -p interval-backend`, the frontend build (which also type-checks), a step that stages the backend binary, then `electron-builder`. Artifacts land in `desktop/release/` — NSIS `.exe` on Windows, `.dmg` on macOS, `.AppImage` on Linux. Each platform must be built on itself; the Rust backend cannot be cross-compiled between them. `.github/workflows/desktop.yml` builds all three on GitHub Actions runners.
+
+At runtime the shell picks a free port starting at `45900`, spawns the backend with a per-user data directory as its working directory, waits for `/healthz`, then loads the dashboard. That data directory is `%APPDATA%\Interval\data` on Windows, `~/Library/Application Support/Interval/data` on macOS, and `~/.config/Interval/data` on Linux. It is a subdirectory rather than the profile root because Electron keeps its own `Cache/` and storage folders there. It holds:
+
+```text
+.env                       user-editable configuration
+interval.db                the app's database
+backend/assets/tracks/     curated track geometry, refreshed each launch
+scripts/                   FastF1 export script, refreshed each launch
+cache/                     FastF1 venv, HTTP cache, and exported bundles
+logs/backend.log           backend output for the current session
+```
+
+Notes on the packaged app:
+
+- It starts with an **empty database** and populates it by ingesting sessions on demand. The working `interval.db` in this repository is far too large to ship.
+- To use a live OpenF1 token, put `INTERVAL_OPENF1_LIVE_TOKEN` in the `.env` inside that data directory. Any variable the shell does not set itself can be overridden there.
+- Historical ingest requires **Python on `PATH`**; the backend builds its own FastF1 virtual environment inside `cache/` on first use. Live timing and already-ingested replays work without Python.
+- Installers are unsigned. Windows shows a SmartScreen prompt on first run, and macOS reports the app as damaged unless it is opened via right-click → Open. Signing and notarization are out of scope.
 
 ## Verification
 
