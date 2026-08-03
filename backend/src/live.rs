@@ -528,18 +528,31 @@ fn live_session_with_refresh_error(
     mut session: OpenF1LiveSession,
     error: anyhow::Error,
 ) -> OpenF1LiveSession {
-    session.raw_bundle.push(LiveCachedEndpoint {
-        raw: RawEndpoint {
-            endpoint: "refresh".to_string(),
-            session_key: session.session.session_key,
-            payload: Value::Array(vec![]),
-        },
-        fetched_at: Utc::now(),
-        attempted_at: Utc::now(),
-        failure_count: 1,
-        last_error: Some(format!("OpenF1 live refresh failed: {error}")),
-    });
-    session.updated_at = Utc::now().to_rfc3339();
+    let now = Utc::now();
+    let message = format!("OpenF1 live refresh failed: {error}");
+    if let Some(entry) = session
+        .raw_bundle
+        .iter_mut()
+        .find(|entry| entry.raw.endpoint == "refresh")
+    {
+        entry.fetched_at = now;
+        entry.attempted_at = now;
+        entry.failure_count = entry.failure_count.saturating_add(1);
+        entry.last_error = Some(message);
+    } else {
+        session.raw_bundle.push(LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "refresh".to_string(),
+                session_key: session.session.session_key,
+                payload: Value::Array(vec![]),
+            },
+            fetched_at: now,
+            attempted_at: now,
+            failure_count: 1,
+            last_error: Some(message),
+        });
+    }
+    session.updated_at = now.to_rfc3339();
     session
 }
 

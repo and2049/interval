@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 const DEFAULT_BASE_URL: &str = "https://api.openf1.org/v1/";
 const OPENF1_LIVE_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 const OPENF1_LIVE_REQUEST_INTERVAL_MS: u64 = 100;
+const SCHEDULE_CACHE_SECONDS: u64 = 60;
 const LIVE_WINDOW_PADDING_MINUTES: i64 = 30;
 const LIVE_ENDPOINTS: &[LiveEndpointSpec] = &[
     LiveEndpointSpec {
@@ -79,11 +80,19 @@ pub struct OpenF1LiveClient {
     config: OpenF1LiveConfig,
     config_error: Option<String>,
     request_limiter: Arc<Mutex<LiveRequestLimiter>>,
+    schedule_cache: Arc<Mutex<Option<ScheduleCacheEntry>>>,
 }
 
 #[derive(Debug, Default)]
 struct LiveRequestLimiter {
     next_request: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct ScheduleCacheEntry {
+    fetched_at: Instant,
+    sessions: Vec<Session>,
+    meetings: Vec<Meeting>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +162,7 @@ impl OpenF1LiveClient {
             },
             config_error,
             request_limiter: Arc::new(Mutex::new(LiveRequestLimiter::default())),
+            schedule_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -164,6 +174,7 @@ impl OpenF1LiveClient {
             config,
             config_error: None,
             request_limiter: Arc::new(Mutex::new(LiveRequestLimiter::default())),
+            schedule_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -174,6 +185,7 @@ impl OpenF1LiveClient {
             config,
             config_error: Some(error.into()),
             request_limiter: Arc::new(Mutex::new(LiveRequestLimiter::default())),
+            schedule_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -210,7 +222,42 @@ impl OpenF1LiveClient {
             });
         }
         self.ensure_valid_config()?;
+        let (sessions, meetings) = self.cached_schedule(now).await?;
 
+        Ok(LiveSessionDiscovery {
+            current: current_live_session_from_schedule(&sessions, &meetings, now),
+            next: next_live_session_from_schedule(&sessions, &meetings, now),
+        })
+    }
+
+    /// Season schedules change rarely; caching them keeps `current()` polls
+    /// from re-fetching the full year of meetings and sessions every time.
+    async fn cached_schedule(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<(Vec<Session>, Vec<Meeting>), OpenF1LiveError> {
+        {
+            let cache = self.schedule_cache.lock().await;
+            if let Some(entry) = cache.as_ref() {
+                if entry.fetched_at.elapsed() < Duration::from_secs(SCHEDULE_CACHE_SECONDS) {
+                    return Ok((entry.sessions.clone(), entry.meetings.clone()));
+                }
+            }
+        }
+
+        let (sessions, meetings) = self.fetch_schedule(now).await?;
+        *self.schedule_cache.lock().await = Some(ScheduleCacheEntry {
+            fetched_at: Instant::now(),
+            sessions: sessions.clone(),
+            meetings: meetings.clone(),
+        });
+        Ok((sessions, meetings))
+    }
+
+    async fn fetch_schedule(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<(Vec<Session>, Vec<Meeting>), OpenF1LiveError> {
         let year = now.year();
         let meetings_payload = self
             .fetch_endpoint("meetings", &[("year".to_string(), year.to_string())])
@@ -237,10 +284,7 @@ impl OpenF1LiveClient {
             }
         }
 
-        Ok(LiveSessionDiscovery {
-            current: current_live_session_from_schedule(&sessions, &meetings, now),
-            next: next_live_session_from_schedule(&sessions, &meetings, now),
-        })
+        Ok((sessions, meetings))
     }
 
     pub async fn fetch_live_bundle(

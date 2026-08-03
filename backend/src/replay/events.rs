@@ -6,9 +6,15 @@ use crate::{
 pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
     let mut events = Vec::new();
     let source = event_source(data.source);
-    for (idx, event) in data.race_control.iter().enumerate() {
+    for event in &data.race_control {
+        // Ids are content-derived so they stay stable across live refreshes
+        // even when older rows get trimmed; SSE clients dedupe by id.
         events.push(ReplayEvent {
-            id: format!("race-control-{idx}"),
+            id: format!(
+                "race-control-{:.3}-{:08x}",
+                event.t,
+                stable_hash(&event.message)
+            ),
             t: event.t,
             kind: EventKind::RaceControl,
             severity: if event.flag.as_deref() == Some("red") {
@@ -23,9 +29,9 @@ pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
             source: source.clone(),
             payload: serde_json::to_value(event).unwrap_or(serde_json::Value::Null),
         });
-        if event.flag.is_some() {
+        if let Some(flag) = &event.flag {
             events.push(ReplayEvent {
-                id: format!("track-status-{idx}"),
+                id: format!("track-status-{:.3}-{flag}", event.t),
                 t: event.t,
                 kind: EventKind::TrackStatus,
                 severity: EventSeverity::Notice,
@@ -36,9 +42,9 @@ pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
             });
         }
     }
-    for (idx, pit) in data.pits.iter().enumerate() {
+    for pit in &data.pits {
         events.push(ReplayEvent {
-            id: format!("pit-stop-{idx}"),
+            id: format!("pit-stop-{:.3}-{}", pit.t, pit.driver_number),
             t: pit.t,
             kind: EventKind::PitStop,
             severity: EventSeverity::Info,
@@ -59,6 +65,15 @@ pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
     events.extend(super::derived_events::driver_out_events(data));
     events.sort_by(|a, b| a.t.total_cmp(&b.t).then_with(|| a.id.cmp(&b.id)));
     events
+}
+
+fn stable_hash(text: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 fn event_source(source: crate::normalization::RaceDataSource) -> EventSource {

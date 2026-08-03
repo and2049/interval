@@ -188,7 +188,7 @@ Returns `404` when replay artifacts do not exist for the session. A valid replay
   "contract_version": "replay.v1",
   "events": [
     {
-      "id": "race-control-0",
+      "id": "race-control-125.000-4be81a2c",
       "t": 120.0,
       "kind": "race_control",
       "severity": "warning",
