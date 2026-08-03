@@ -921,3 +921,481 @@ fn empty_bundle(session_key: i64) -> Vec<RawEndpoint> {
     .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::SessionType;
+
+    #[test]
+    fn channel_health_marks_cached_payload_with_refresh_error_as_cached() {
+        let endpoint = LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "location".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([{ "driver_number": 1 }]),
+            },
+            fetched_at: Utc::now() - ChronoDuration::seconds(2),
+            attempted_at: Utc::now(),
+            failure_count: 1,
+            last_error: Some("OpenF1 live request failed".to_string()),
+        };
+
+        let health = live_channel_health(&[endpoint], Utc::now());
+
+        assert_eq!(health[0].state, LiveChannelState::Cached);
+        assert_eq!(health[0].rows, Some(1));
+        assert!(health[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("OpenF1 live request failed")));
+    }
+
+    #[test]
+    fn channel_health_marks_old_failed_payload_as_stale() {
+        let now = Utc::now();
+        let endpoint = LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "location".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([{ "driver_number": 1 }]),
+            },
+            fetched_at: now - ChronoDuration::seconds(30),
+            attempted_at: now,
+            failure_count: 3,
+            last_error: Some("OpenF1 live request failed".to_string()),
+        };
+
+        assert_eq!(
+            live_channel_health(&[endpoint], now)[0].state,
+            LiveChannelState::Stale
+        );
+    }
+
+    #[test]
+    fn failed_endpoint_retries_back_off_to_thirty_seconds() {
+        assert_eq!(live_retry_delay(500, 1), ChronoDuration::seconds(1));
+        assert_eq!(live_retry_delay(500, 6), ChronoDuration::seconds(16));
+        assert_eq!(live_retry_delay(2_000, 6), ChronoDuration::seconds(30));
+    }
+
+    #[test]
+    fn channel_health_clamps_negative_age_to_zero() {
+        let now = Utc::now();
+        let endpoint = LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "location".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([{ "driver_number": 1 }]),
+            },
+            fetched_at: now + ChronoDuration::seconds(1),
+            attempted_at: now,
+            failure_count: 0,
+            last_error: None,
+        };
+
+        let health = live_channel_health(&[endpoint], now);
+
+        assert_eq!(health[0].age_seconds, Some(0.0));
+        assert_eq!(health[0].state, LiveChannelState::Fresh);
+    }
+
+    #[test]
+    fn channel_health_uses_endpoint_cadence_for_slow_live_feeds() {
+        let now = Utc::now();
+        let driver_endpoint = LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "drivers".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([{ "driver_number": 1 }]),
+            },
+            fetched_at: now - ChronoDuration::seconds(20),
+            attempted_at: now,
+            failure_count: 0,
+            last_error: None,
+        };
+        let old_weather_endpoint = LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "weather".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([{ "air_temperature": 22.0 }]),
+            },
+            // Weather is polled once a minute, so it stays "cached" for three minutes
+            // before it counts as stale.
+            fetched_at: now - ChronoDuration::seconds(200),
+            attempted_at: now,
+            failure_count: 0,
+            last_error: None,
+        };
+
+        let health = live_channel_health(&[driver_endpoint, old_weather_endpoint], now);
+
+        assert_eq!(health[0].state, LiveChannelState::Fresh);
+        assert_eq!(health[1].state, LiveChannelState::Stale);
+    }
+
+    #[test]
+    fn channel_health_treats_successful_empty_optional_live_feeds_as_fresh() {
+        let now = Utc::now();
+        let empty_pit_endpoint = LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "pit".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([]),
+            },
+            fetched_at: now,
+            attempted_at: now,
+            failure_count: 0,
+            last_error: None,
+        };
+        let empty_driver_endpoint = LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "drivers".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([]),
+            },
+            fetched_at: now,
+            attempted_at: now,
+            failure_count: 0,
+            last_error: None,
+        };
+
+        let health = live_channel_health(&[empty_pit_endpoint, empty_driver_endpoint], now);
+
+        assert_eq!(health[0].state, LiveChannelState::Fresh);
+        assert_eq!(health[0].rows, Some(0));
+        assert_eq!(health[1].state, LiveChannelState::Missing);
+    }
+
+    #[test]
+    fn merge_live_payload_keeps_previous_rows_and_deduplicates_new_rows() {
+        let previous = RawEndpoint {
+            endpoint: "position".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "driver_number": 1, "position": 1, "date": "2026-06-28T13:00:00Z" }
+            ]),
+        };
+        let fetched = RawEndpoint {
+            endpoint: "position".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "driver_number": 1, "position": 1, "date": "2026-06-28T13:00:00Z" },
+                { "driver_number": 16, "position": 2, "date": "2026-06-28T13:00:01Z" }
+            ]),
+        };
+
+        let merged = merge_live_payload(Some(previous), fetched);
+
+        let rows = merged.payload.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["driver_number"], 1);
+        assert_eq!(rows[1]["driver_number"], 16);
+    }
+
+    #[test]
+    fn merge_live_payload_keeps_distinct_race_control_rows_with_same_timestamp() {
+        let previous = RawEndpoint {
+            endpoint: "race_control".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "date": "2026-06-28T13:00:00Z", "message": "YELLOW IN SECTOR 2" }
+            ]),
+        };
+        let fetched = RawEndpoint {
+            endpoint: "race_control".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "date": "2026-06-28T13:00:00Z", "message": "YELLOW IN SECTOR 2" },
+                { "date": "2026-06-28T13:00:00Z", "message": "TURN 5 INCIDENT NOTED" }
+            ]),
+        };
+
+        let merged = merge_live_payload(Some(previous), fetched);
+
+        let rows = merged.payload.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["message"], "YELLOW IN SECTOR 2");
+        assert_eq!(rows[1]["message"], "TURN 5 INCIDENT NOTED");
+    }
+
+    #[test]
+    fn merge_live_payload_replaces_updated_lap_rows_instead_of_duplicating() {
+        let previous = RawEndpoint {
+            endpoint: "laps".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "driver_number": 1, "lap_number": 5, "lap_duration": null },
+                { "driver_number": 16, "lap_number": 5, "lap_duration": 93.1 }
+            ]),
+        };
+        let fetched = RawEndpoint {
+            endpoint: "laps".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "driver_number": 1, "lap_number": 5, "lap_duration": 92.4 },
+                { "driver_number": 16, "lap_number": 5, "lap_duration": 93.1 },
+                { "driver_number": 1, "lap_number": 6, "lap_duration": null }
+            ]),
+        };
+
+        let merged = merge_live_payload(Some(previous), fetched);
+
+        let rows = merged.payload.as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["driver_number"], 1);
+        assert_eq!(rows[0]["lap_number"], 5);
+        assert_eq!(rows[0]["lap_duration"], 92.4);
+        assert_eq!(rows[2]["lap_number"], 6);
+    }
+
+    #[test]
+    fn merge_live_payload_replaces_updated_stint_and_driver_rows() {
+        let previous = RawEndpoint {
+            endpoint: "stints".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "driver_number": 1, "stint_number": 2, "lap_start": 11, "lap_end": 14 }
+            ]),
+        };
+        let fetched = RawEndpoint {
+            endpoint: "stints".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "driver_number": 1, "stint_number": 2, "lap_start": 11, "lap_end": 15 }
+            ]),
+        };
+
+        let merged = merge_live_payload(Some(previous), fetched);
+
+        let rows = merged.payload.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["lap_end"], 15);
+    }
+
+    #[test]
+    fn merge_live_payload_keeps_latest_rows_when_endpoint_exceeds_limit() {
+        let previous_rows: Vec<Value> = (0..1_000)
+            .map(|idx| serde_json::json!({ "driver_number": 1, "date": idx }))
+            .collect();
+        let fetched_rows: Vec<Value> = (1_000..1_005)
+            .map(|idx| serde_json::json!({ "driver_number": 1, "date": idx }))
+            .collect();
+        let previous = RawEndpoint {
+            endpoint: "race_control".to_string(),
+            session_key: 1,
+            payload: Value::Array(previous_rows),
+        };
+        let fetched = RawEndpoint {
+            endpoint: "race_control".to_string(),
+            session_key: 1,
+            payload: Value::Array(fetched_rows),
+        };
+
+        let merged = merge_live_payload(Some(previous), fetched);
+
+        let rows = merged.payload.as_array().unwrap();
+        assert_eq!(rows.len(), 1_000);
+        assert_eq!(rows.first().unwrap()["date"], 5);
+        assert_eq!(rows.last().unwrap()["date"], 1_004);
+    }
+
+    #[test]
+    fn live_incremental_since_uses_latest_row_timestamp_with_overlap() {
+        let fetched_at = DateTime::parse_from_rfc3339("2026-06-28T13:00:20Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let endpoint = LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "position".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([
+                    { "driver_number": 1, "date": "2026-06-28T13:00:08Z" },
+                    { "driver_number": 2, "date": "2026-06-28T13:00:10Z" }
+                ]),
+            },
+            fetched_at,
+            attempted_at: fetched_at,
+            failure_count: 0,
+            last_error: None,
+        };
+
+        let since = live_incremental_since(&endpoint, Some("date"));
+
+        assert_eq!(since.to_rfc3339(), "2026-06-28T13:00:05+00:00");
+    }
+
+    #[test]
+    fn live_incremental_since_falls_back_to_fetch_time_without_row_timestamp() {
+        let fetched_at = DateTime::parse_from_rfc3339("2026-06-28T13:00:20Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let endpoint = LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "position".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([{ "driver_number": 1 }]),
+            },
+            fetched_at,
+            attempted_at: fetched_at,
+            failure_count: 0,
+            last_error: None,
+        };
+
+        let since = live_incremental_since(&endpoint, Some("date"));
+
+        assert_eq!(since.to_rfc3339(), "2026-06-28T13:00:15+00:00");
+    }
+
+    #[test]
+    fn live_session_window_stays_open_during_post_session_padding() {
+        let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T15:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T15:29:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(!live_session_window_closed(&session, &[], now));
+    }
+
+    #[test]
+    fn live_session_window_stays_open_past_padding_while_rows_still_arrive() {
+        let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T15:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T16:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let bundle = [LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "location".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([
+                    { "driver_number": 1, "date": "2026-06-28T16:05:00Z" }
+                ]),
+            },
+            fetched_at: now,
+            attempted_at: now,
+            failure_count: 0,
+            last_error: None,
+        }];
+
+        assert!(!live_session_window_closed(&session, &bundle, now));
+    }
+
+    #[test]
+    fn live_session_window_closes_past_padding_once_feed_goes_quiet() {
+        let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T15:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T16:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let bundle = [LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "location".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([
+                    { "driver_number": 1, "date": "2026-06-28T15:55:00Z" }
+                ]),
+            },
+            fetched_at: now,
+            attempted_at: now,
+            failure_count: 0,
+            last_error: None,
+        }];
+
+        assert!(live_session_window_closed(&session, &bundle, now));
+    }
+
+    #[test]
+    fn live_snapshot_time_lags_wall_clock_when_data_is_fresh() {
+        let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T15:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T13:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now, Some(1_797.0));
+
+        assert_eq!(snapshot_t, 1_800.0 - live_display_delay_seconds());
+        assert_eq!(max_t, 7_200.0);
+    }
+
+    #[test]
+    fn live_display_delay_covers_a_full_location_poll_plus_upstream_lag() {
+        // Location polled every 5 s, OpenF1 itself ~3 s behind: without at least that
+        // much delay the cursor outruns the data and the map stutters.
+        let delay = live_display_delay_seconds();
+        assert_eq!(delay, 5.0 + LIVE_UPSTREAM_LAG_ALLOWANCE_SECONDS);
+        assert!(delay >= live_endpoint_cadence_seconds("location") + 5.0);
+    }
+
+    #[test]
+    fn live_snapshot_time_clamps_to_latest_location_when_feed_stalls() {
+        let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T15:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T13:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let (snapshot_t, _) = live_snapshot_time_bounds(&session, now, Some(1_700.0));
+
+        assert_eq!(snapshot_t, 1_700.0);
+    }
+
+    #[test]
+    fn live_snapshot_time_clamps_during_post_session_padding() {
+        let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T15:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T15:20:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now, None);
+
+        assert_eq!(max_t, 8_400.0);
+        assert_eq!(snapshot_t, 8_400.0 - live_display_delay_seconds());
+    }
+
+    #[test]
+    fn live_snapshot_time_uses_default_duration_when_end_time_is_missing() {
+        let session = test_session("2026-06-28T13:00:00Z", "");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T14:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now, None);
+
+        assert_eq!(snapshot_t, 3_600.0 - live_display_delay_seconds());
+        assert_eq!(max_t, 10_800.0);
+    }
+
+    #[test]
+    fn live_snapshot_time_uses_default_duration_when_end_time_is_before_start() {
+        let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T12:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T14:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now, None);
+
+        assert_eq!(snapshot_t, 3_600.0 - live_display_delay_seconds());
+        assert_eq!(max_t, 10_800.0);
+        assert!(!live_session_window_closed(&session, &[], now));
+    }
+
+    #[test]
+    fn live_session_window_closes_after_padding() {
+        let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T15:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T15:30:01Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(live_session_window_closed(&session, &[], now));
+    }
+
+    fn test_session(start_time: &str, end_time: &str) -> Session {
+        Session {
+            session_key: 1,
+            meeting_key: 2,
+            year: 2026,
+            name: "Race".to_string(),
+            session_type: SessionType::Race,
+            start_time: start_time.to_string(),
+            end_time: end_time.to_string(),
+            total_laps: 0,
+        }
+    }
+}
