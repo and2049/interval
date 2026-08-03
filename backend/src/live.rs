@@ -478,10 +478,10 @@ fn merge_live_payload(previous: Option<RawEndpoint>, mut fetched: RawEndpoint) -
     let mut indexes = rows
         .iter()
         .enumerate()
-        .filter_map(|(index, row)| live_row_key(row).map(|key| (key, index)))
+        .filter_map(|(index, row)| live_row_key(&fetched.endpoint, row).map(|key| (key, index)))
         .collect::<HashMap<_, _>>();
     for row in fetched_rows {
-        let Some(key) = live_row_key(&row) else {
+        let Some(key) = live_row_key(&fetched.endpoint, &row) else {
             continue;
         };
         if let Some(index) = indexes.get(&key).copied() {
@@ -496,15 +496,28 @@ fn merge_live_payload(previous: Option<RawEndpoint>, mut fetched: RawEndpoint) -
     fetched
 }
 
-fn live_row_key(row: &Value) -> Option<String> {
-    if let Some(date) = row.get("date").and_then(Value::as_str) {
-        let driver = row
-            .get("driver_number")
-            .and_then(Value::as_i64)
-            .unwrap_or_default();
-        return Some(format!("{driver}:{date}"));
-    }
-    serde_json::to_string(row).ok()
+fn live_row_key(endpoint: &str, row: &Value) -> Option<String> {
+    let driver = row.get("driver_number").and_then(Value::as_i64);
+    let key = match endpoint {
+        // Rows on these endpoints mutate as data fills in (sector times,
+        // stint lap_end, ...), so key on row identity to replace older
+        // versions instead of accumulating duplicates.
+        "laps" => driver
+            .zip(row.get("lap_number").and_then(Value::as_i64))
+            .map(|(driver, lap)| format!("{driver}:{lap}")),
+        "stints" => driver
+            .zip(row.get("stint_number").and_then(Value::as_i64))
+            .map(|(driver, stint)| format!("{driver}:{stint}")),
+        "drivers" | "session_result" => driver.map(|driver| driver.to_string()),
+        // Distinct race control messages routinely share a timestamp, so the
+        // full row is the only collision-free key.
+        "race_control" => None,
+        _ => row
+            .get("date")
+            .and_then(Value::as_str)
+            .map(|date| format!("{}:{date}", driver.unwrap_or_default())),
+    };
+    key.or_else(|| serde_json::to_string(row).ok())
 }
 
 fn live_session_with_refresh_error(
@@ -1000,6 +1013,86 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["driver_number"], 1);
         assert_eq!(rows[1]["driver_number"], 16);
+    }
+
+    #[test]
+    fn merge_live_payload_keeps_distinct_race_control_rows_with_same_timestamp() {
+        let previous = RawEndpoint {
+            endpoint: "race_control".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "date": "2026-06-28T13:00:00Z", "message": "YELLOW IN SECTOR 2" }
+            ]),
+        };
+        let fetched = RawEndpoint {
+            endpoint: "race_control".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "date": "2026-06-28T13:00:00Z", "message": "YELLOW IN SECTOR 2" },
+                { "date": "2026-06-28T13:00:00Z", "message": "TURN 5 INCIDENT NOTED" }
+            ]),
+        };
+
+        let merged = merge_live_payload(Some(previous), fetched);
+
+        let rows = merged.payload.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["message"], "YELLOW IN SECTOR 2");
+        assert_eq!(rows[1]["message"], "TURN 5 INCIDENT NOTED");
+    }
+
+    #[test]
+    fn merge_live_payload_replaces_updated_lap_rows_instead_of_duplicating() {
+        let previous = RawEndpoint {
+            endpoint: "laps".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "driver_number": 1, "lap_number": 5, "lap_duration": null },
+                { "driver_number": 16, "lap_number": 5, "lap_duration": 93.1 }
+            ]),
+        };
+        let fetched = RawEndpoint {
+            endpoint: "laps".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "driver_number": 1, "lap_number": 5, "lap_duration": 92.4 },
+                { "driver_number": 16, "lap_number": 5, "lap_duration": 93.1 },
+                { "driver_number": 1, "lap_number": 6, "lap_duration": null }
+            ]),
+        };
+
+        let merged = merge_live_payload(Some(previous), fetched);
+
+        let rows = merged.payload.as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["driver_number"], 1);
+        assert_eq!(rows[0]["lap_number"], 5);
+        assert_eq!(rows[0]["lap_duration"], 92.4);
+        assert_eq!(rows[2]["lap_number"], 6);
+    }
+
+    #[test]
+    fn merge_live_payload_replaces_updated_stint_and_driver_rows() {
+        let previous = RawEndpoint {
+            endpoint: "stints".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "driver_number": 1, "stint_number": 2, "lap_start": 11, "lap_end": 14 }
+            ]),
+        };
+        let fetched = RawEndpoint {
+            endpoint: "stints".to_string(),
+            session_key: 1,
+            payload: serde_json::json!([
+                { "driver_number": 1, "stint_number": 2, "lap_start": 11, "lap_end": 15 }
+            ]),
+        };
+
+        let merged = merge_live_payload(Some(previous), fetched);
+
+        let rows = merged.payload.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["lap_end"], 15);
     }
 
     #[test]
