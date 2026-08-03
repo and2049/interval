@@ -30,6 +30,7 @@ const LIVE_FRAME_STEP_SECONDS: f64 = 0.5;
 // that has already arrived, so location interpolation stays smooth.
 const LIVE_DISPLAY_DELAY_SECONDS: f64 = 8.0;
 const LIVE_WINDOW_PADDING_MINUTES: i64 = 30;
+const LIVE_QUIET_SHUTDOWN_MINUTES: i64 = 10;
 const LIVE_INCREMENTAL_ROW_OVERLAP_SECONDS: i64 = 5;
 const DEFAULT_LIVE_ENDPOINT_ROW_LIMIT: usize = 10_000;
 
@@ -207,7 +208,7 @@ impl OpenF1LiveRegistry {
         let Some(existing) = self.sessions.lock().await.get(&session_key).cloned() else {
             return Ok(None);
         };
-        if live_session_window_closed(&existing.session, Utc::now()) {
+        if live_session_window_closed(&existing.session, &existing.raw_bundle, Utc::now()) {
             self.sessions.lock().await.remove(&session_key);
             return Ok(None);
         }
@@ -283,10 +284,9 @@ impl OpenF1LiveRegistry {
 
     async fn active_session(&self, session_key: i64) -> Option<OpenF1LiveSession> {
         let mut sessions = self.sessions.lock().await;
-        if sessions
-            .get(&session_key)
-            .is_some_and(|session| live_session_window_closed(&session.session, Utc::now()))
-        {
+        if sessions.get(&session_key).is_some_and(|session| {
+            live_session_window_closed(&session.session, &session.raw_bundle, Utc::now())
+        }) {
             sessions.remove(&session_key);
             return None;
         }
@@ -295,7 +295,9 @@ impl OpenF1LiveRegistry {
 
     async fn current_active_session(&self) -> Option<OpenF1LiveSession> {
         let mut sessions = self.sessions.lock().await;
-        sessions.retain(|_, session| !live_session_window_closed(&session.session, Utc::now()));
+        sessions.retain(|_, session| {
+            !live_session_window_closed(&session.session, &session.raw_bundle, Utc::now())
+        });
         sessions.values().next().cloned()
     }
 
@@ -818,13 +820,35 @@ fn live_snapshot_time_bounds(
     (snapshot_t, max_t)
 }
 
-fn live_session_window_closed(session: &Session, now: DateTime<Utc>) -> bool {
+fn live_session_window_closed(
+    session: &Session,
+    bundle: &[LiveCachedEndpoint],
+    now: DateTime<Utc>,
+) -> bool {
     let Ok(start) = DateTime::parse_from_rfc3339(&session.start_time) else {
         return false;
     };
     let start = start.with_timezone(&Utc);
     let end = live_session_end_or_default(start, &session.end_time);
-    now > end + ChronoDuration::minutes(LIVE_WINDOW_PADDING_MINUTES)
+    if now <= end + ChronoDuration::minutes(LIVE_WINDOW_PADDING_MINUTES) {
+        return false;
+    }
+    // Red flags routinely push races long past their scheduled end, so past
+    // the padded window only close once the feed has gone quiet.
+    match latest_live_row_time(bundle) {
+        Some(latest) => {
+            now.signed_duration_since(latest)
+                > ChronoDuration::minutes(LIVE_QUIET_SHUTDOWN_MINUTES)
+        }
+        None => true,
+    }
+}
+
+fn latest_live_row_time(bundle: &[LiveCachedEndpoint]) -> Option<DateTime<Utc>> {
+    bundle
+        .iter()
+        .filter_map(|endpoint| latest_row_timestamp(&endpoint.raw.payload, "date"))
+        .max()
 }
 
 fn live_session_end_or_default(start: DateTime<Utc>, end_time: &str) -> DateTime<Utc> {
@@ -1188,7 +1212,53 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
 
-        assert!(!live_session_window_closed(&session, now));
+        assert!(!live_session_window_closed(&session, &[], now));
+    }
+
+    #[test]
+    fn live_session_window_stays_open_past_padding_while_rows_still_arrive() {
+        let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T15:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T16:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let bundle = [LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "location".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([
+                    { "driver_number": 1, "date": "2026-06-28T16:05:00Z" }
+                ]),
+            },
+            fetched_at: now,
+            attempted_at: now,
+            failure_count: 0,
+            last_error: None,
+        }];
+
+        assert!(!live_session_window_closed(&session, &bundle, now));
+    }
+
+    #[test]
+    fn live_session_window_closes_past_padding_once_feed_goes_quiet() {
+        let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T15:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T16:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let bundle = [LiveCachedEndpoint {
+            raw: RawEndpoint {
+                endpoint: "location".to_string(),
+                session_key: 1,
+                payload: serde_json::json!([
+                    { "driver_number": 1, "date": "2026-06-28T15:55:00Z" }
+                ]),
+            },
+            fetched_at: now,
+            attempted_at: now,
+            failure_count: 0,
+            last_error: None,
+        }];
+
+        assert!(live_session_window_closed(&session, &bundle, now));
     }
 
     #[test]
@@ -1253,7 +1323,7 @@ mod tests {
 
         assert_eq!(snapshot_t, 3_600.0 - LIVE_DISPLAY_DELAY_SECONDS);
         assert_eq!(max_t, 10_800.0);
-        assert!(!live_session_window_closed(&session, now));
+        assert!(!live_session_window_closed(&session, &[], now));
     }
 
     #[test]
@@ -1263,7 +1333,7 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
 
-        assert!(live_session_window_closed(&session, now));
+        assert!(live_session_window_closed(&session, &[], now));
     }
 
     fn test_session(start_time: &str, end_time: &str) -> Session {
