@@ -16,6 +16,19 @@ use crate::{connectors::openf1_historical::RawEndpoint, domain::Session};
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Deserializes payload rows one at a time so a single malformed row is
+/// dropped instead of failing the whole endpoint (which would wedge live
+/// refreshes for as long as the row keeps being served).
+pub(crate) fn lenient_rows<T: serde::de::DeserializeOwned>(payload: Value) -> Vec<T> {
+    match payload {
+        Value::Array(rows) => rows
+            .into_iter()
+            .filter_map(|row| serde_json::from_value(row).ok())
+            .collect(),
+        _ => vec![],
+    }
+}
+
 pub fn race_data_from_bundle(
     bundle: &[RawEndpoint],
     session: &Session,
@@ -206,6 +219,38 @@ mod tests {
         assert_eq!(sessions[0].end_time, "");
         assert_eq!(sessions[1].name, "Sprint");
         assert_eq!(sessions[1].session_type, SessionType::Sprint);
+    }
+
+    #[test]
+    fn malformed_rows_are_skipped_instead_of_failing_the_endpoint() {
+        let endpoint = RawEndpoint {
+            endpoint: "laps".to_string(),
+            session_key: 2,
+            payload: json!([
+                { "driver_number": null, "lap_number": 3 },
+                {
+                    "driver_number": 4,
+                    "lap_number": 3,
+                    "date_start": "2023-01-02T12:05:00+00:00",
+                    "lap_duration": 92.5
+                }
+            ]),
+        };
+        let session = Session {
+            session_key: 2,
+            meeting_key: 10,
+            year: 2023,
+            name: "Race".to_string(),
+            session_type: SessionType::Race,
+            start_time: "2023-01-02T12:00:00+00:00".to_string(),
+            end_time: "2023-01-02T14:00:00+00:00".to_string(),
+            total_laps: 0,
+        };
+
+        let data = race_data_from_bundle(&[endpoint], &session).unwrap();
+
+        assert_eq!(data.laps.len(), 1);
+        assert_eq!(data.laps[0].lap.driver_number, 4);
     }
 
     #[test]

@@ -16,7 +16,7 @@ pub fn location_samples(
     payload: Value,
     session_start: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<LocationRecord>> {
-    let rows = serde_json::from_value::<Vec<OpenF1Location>>(payload)?;
+    let rows = super::lenient_rows::<OpenF1Location>(payload);
     Ok(rows
         .into_iter()
         .filter_map(|row| {

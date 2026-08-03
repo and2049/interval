@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 pub fn meetings_from_openf1(payload: Value) -> anyhow::Result<Vec<Meeting>> {
-    let rows = serde_json::from_value::<Vec<OpenF1Meeting>>(payload)?;
+    let rows = crate::normalization::lenient_rows::<OpenF1Meeting>(payload);
     Ok(rows
         .into_iter()
         .map(|row| Meeting {
@@ -17,7 +17,7 @@ pub fn meetings_from_openf1(payload: Value) -> anyhow::Result<Vec<Meeting>> {
 }
 
 pub fn race_sessions_from_openf1(payload: Value) -> anyhow::Result<Vec<Session>> {
-    let rows = serde_json::from_value::<Vec<OpenF1Session>>(payload)?;
+    let rows = crate::normalization::lenient_rows::<OpenF1Session>(payload);
     Ok(rows
         .into_iter()
         .filter_map(|row| {

@@ -9,7 +9,7 @@ use serde_json::Value;
 use super::{t_since_start, IntervalRecord, LapRecord, PitEvent, PositionRecord, SessionResult};
 
 pub(super) fn drivers(payload: Value) -> anyhow::Result<Vec<Driver>> {
-    let rows = serde_json::from_value::<Vec<OpenF1Driver>>(payload)?;
+    let rows = super::lenient_rows::<OpenF1Driver>(payload);
     Ok(rows
         .into_iter()
         .map(|row| Driver {
@@ -28,7 +28,7 @@ pub(super) fn laps(
     payload: Value,
     session_start: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<LapRecord>> {
-    let rows = serde_json::from_value::<Vec<OpenF1Lap>>(payload)?;
+    let rows = super::lenient_rows::<OpenF1Lap>(payload);
     Ok(rows
         .into_iter()
         .filter_map(|row| {
@@ -52,7 +52,7 @@ pub(super) fn intervals(
     payload: Value,
     session_start: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<IntervalRecord>> {
-    let rows = serde_json::from_value::<Vec<OpenF1Interval>>(payload)?;
+    let rows = super::lenient_rows::<OpenF1Interval>(payload);
     Ok(rows
         .into_iter()
         .filter_map(|row| {
@@ -70,7 +70,7 @@ pub(super) fn positions(
     payload: Value,
     session_start: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<PositionRecord>> {
-    let rows = serde_json::from_value::<Vec<OpenF1PositionLike>>(payload)?;
+    let rows = super::lenient_rows::<OpenF1PositionLike>(payload);
     Ok(rows
         .into_iter()
         .filter_map(|row| {
@@ -98,7 +98,7 @@ pub(super) fn pits(
     payload: Value,
     session_start: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<PitEvent>> {
-    let rows = serde_json::from_value::<Vec<OpenF1Pit>>(payload)?;
+    let rows = super::lenient_rows::<OpenF1Pit>(payload);
     Ok(rows
         .into_iter()
         .filter_map(|row| {
@@ -116,7 +116,7 @@ pub(super) fn race_control(
     payload: Value,
     session_start: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<RaceControlMessage>> {
-    let rows = serde_json::from_value::<Vec<OpenF1RaceControl>>(payload)?;
+    let rows = super::lenient_rows::<OpenF1RaceControl>(payload);
     Ok(rows
         .into_iter()
         .filter_map(|row| {
@@ -132,7 +132,7 @@ pub(super) fn race_control(
 }
 
 pub(super) fn stints(payload: Value) -> anyhow::Result<Vec<Stint>> {
-    let rows = serde_json::from_value::<Vec<OpenF1Stint>>(payload)?;
+    let rows = super::lenient_rows::<OpenF1Stint>(payload);
     Ok(rows
         .into_iter()
         .map(|row| Stint {
@@ -150,7 +150,7 @@ pub(super) fn weather(
     payload: Value,
     session_start: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Vec<WeatherSample>> {
-    let rows = serde_json::from_value::<Vec<OpenF1Weather>>(payload)?;
+    let rows = super::lenient_rows::<OpenF1Weather>(payload);
     Ok(rows
         .into_iter()
         .filter_map(|row| {
@@ -168,7 +168,7 @@ pub(super) fn weather(
 }
 
 pub(super) fn session_results(payload: Value) -> anyhow::Result<Vec<SessionResult>> {
-    let rows = serde_json::from_value::<Vec<OpenF1SessionResult>>(payload)?;
+    let rows = super::lenient_rows::<OpenF1SessionResult>(payload);
     Ok(rows
         .into_iter()
         .map(|row| SessionResult {
