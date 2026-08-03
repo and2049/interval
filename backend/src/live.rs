@@ -25,6 +25,10 @@ use std::{
 use tokio::sync::Mutex;
 
 const LIVE_FRAME_STEP_SECONDS: f64 = 0.5;
+// OpenF1's live feed lags real time by a few seconds and delivers rows in
+// bursts. Running the cursor this far behind wall clock keeps it inside data
+// that has already arrived, so location interpolation stays smooth.
+const LIVE_DISPLAY_DELAY_SECONDS: f64 = 8.0;
 const LIVE_WINDOW_PADDING_MINUTES: i64 = 30;
 const LIVE_INCREMENTAL_ROW_OVERLAP_SECONDS: i64 = 5;
 const DEFAULT_LIVE_ENDPOINT_ROW_LIMIT: usize = 10_000;
@@ -316,7 +320,12 @@ impl OpenF1LiveRegistry {
         ensure_live_data_usable(&data, &raw_bundle)?;
         let events = replay::events::generate_events(&data);
         let geometry = live_track_geometry(pool, &session, meeting.as_ref(), &data).await?;
-        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, Utc::now());
+        let latest_location_t = data
+            .locations
+            .iter()
+            .map(|location| location.t)
+            .max_by(f64::total_cmp);
+        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, Utc::now(), latest_location_t);
         let index = replay::indexed_data::ReplayDataIndex::new(&data);
         let frame_index = (snapshot_t / LIVE_FRAME_STEP_SECONDS).floor() as i64;
         let snapshot = replay::snapshot_builder::build_indexed_snapshot(
@@ -767,12 +776,21 @@ fn session_duration(session: &Session) -> Option<f64> {
     Some(end.signed_duration_since(start).num_milliseconds() as f64 / 1_000.0)
 }
 
-fn live_snapshot_time_bounds(session: &Session, now: DateTime<Utc>) -> (f64, f64) {
+fn live_snapshot_time_bounds(
+    session: &Session,
+    now: DateTime<Utc>,
+    latest_location_t: Option<f64>,
+) -> (f64, f64) {
     let now_t = t_since_session_start(session, now).max(0.0);
     let max_t = session_duration(session)
         .unwrap_or(now_t + LIVE_FRAME_STEP_SECONDS)
         .max(now_t);
-    (now_t.min(max_t), max_t)
+    let target_t = now_t - LIVE_DISPLAY_DELAY_SECONDS;
+    let snapshot_t = latest_location_t
+        .map_or(target_t, |data_t| data_t.min(target_t))
+        .max(0.0)
+        .min(max_t);
+    (snapshot_t, max_t)
 }
 
 fn live_session_window_closed(session: &Session, now: DateTime<Utc>) -> bool {
@@ -1069,16 +1087,41 @@ mod tests {
     }
 
     #[test]
+    fn live_snapshot_time_lags_wall_clock_when_data_is_fresh() {
+        let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T15:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T13:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now, Some(1_797.0));
+
+        assert_eq!(snapshot_t, 1_800.0 - LIVE_DISPLAY_DELAY_SECONDS);
+        assert_eq!(max_t, 7_200.0);
+    }
+
+    #[test]
+    fn live_snapshot_time_clamps_to_latest_location_when_feed_stalls() {
+        let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T15:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-06-28T13:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let (snapshot_t, _) = live_snapshot_time_bounds(&session, now, Some(1_700.0));
+
+        assert_eq!(snapshot_t, 1_700.0);
+    }
+
+    #[test]
     fn live_snapshot_time_clamps_during_post_session_padding() {
         let session = test_session("2026-06-28T13:00:00Z", "2026-06-28T15:00:00Z");
         let now = DateTime::parse_from_rfc3339("2026-06-28T15:20:00Z")
             .unwrap()
             .with_timezone(&Utc);
 
-        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now);
+        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now, None);
 
         assert_eq!(max_t, 8_400.0);
-        assert_eq!(snapshot_t, 8_400.0);
+        assert_eq!(snapshot_t, 8_400.0 - LIVE_DISPLAY_DELAY_SECONDS);
     }
 
     #[test]
@@ -1088,9 +1131,9 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
 
-        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now);
+        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now, None);
 
-        assert_eq!(snapshot_t, 3_600.0);
+        assert_eq!(snapshot_t, 3_600.0 - LIVE_DISPLAY_DELAY_SECONDS);
         assert_eq!(max_t, 10_800.0);
     }
 
@@ -1101,9 +1144,9 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
 
-        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now);
+        let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now, None);
 
-        assert_eq!(snapshot_t, 3_600.0);
+        assert_eq!(snapshot_t, 3_600.0 - LIVE_DISPLAY_DELAY_SECONDS);
         assert_eq!(max_t, 10_800.0);
         assert!(!live_session_window_closed(&session, now));
     }
