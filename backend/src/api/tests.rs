@@ -1039,10 +1039,12 @@ async fn openf1_live_post_session_padding_keeps_snapshot_clock_advancing() {
     )
     .await;
 
-    assert!(metadata["max_t"]
-        .as_f64()
-        .is_some_and(|max_t| max_t > 3_600.0));
-    assert_eq!(snapshot["cursor"]["t"], metadata["max_t"]);
+    let max_t = metadata["max_t"].as_f64().unwrap();
+    let t = snapshot["cursor"]["t"].as_f64().unwrap();
+    assert!(max_t > 3_600.0);
+    // The clock keeps advancing past the scheduled end, lagged behind the feed.
+    assert!(t > 3_600.0);
+    assert!(t <= max_t);
 }
 
 #[tokio::test]
@@ -1270,7 +1272,7 @@ async fn openf1_live_keeps_last_snapshot_when_refresh_endpoint_fails() {
 }
 
 #[tokio::test]
-async fn openf1_live_keeps_last_snapshot_when_refresh_payload_is_malformed() {
+async fn openf1_live_survives_malformed_rows_in_refresh_payload() {
     let live_mock = spawn_openf1_live_mock_with_config(LiveMockConfig {
         malformed_after_first_endpoints: vec!["location"],
         ..LiveMockConfig::default()
@@ -1318,18 +1320,13 @@ async fn openf1_live_keeps_last_snapshot_when_refresh_payload_is_malformed() {
         StatusCode::OK,
     )
     .await;
-    let refresh = status["channels"]
-        .as_array()
-        .and_then(|channels| {
-            channels
-                .iter()
-                .find(|channel| channel["endpoint"] == "refresh")
-        })
-        .expect("refresh health should be present");
-    assert_eq!(refresh["state"], "failed");
-    assert!(refresh["last_error"]
-        .as_str()
-        .is_some_and(|error| error.contains("OpenF1 live refresh failed")));
+    // Malformed rows are skipped per-row instead of failing the refresh, so
+    // the session stays healthy and no refresh-failure channel appears.
+    let channels = status["channels"].as_array().unwrap();
+    assert!(!channels
+        .iter()
+        .any(|channel| channel["endpoint"] == "refresh"));
+    assert!(status["active"].as_bool().unwrap());
 }
 
 #[tokio::test]
@@ -2089,7 +2086,8 @@ async fn spawn_openf1_live_mock_with_config(config: LiveMockConfig) -> LiveMock 
     let now = chrono::Utc::now();
     let start = now + config.start_offset;
     let end = now + config.end_offset;
-    let recent = now - ChronoDuration::seconds(1);
+    // Older than the live display delay so the lagged cursor covers the rows.
+    let recent = now - ChronoDuration::seconds(12);
     let session_key = 88_001_i64;
     let meeting_key = 88_000_i64;
     let calls = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));

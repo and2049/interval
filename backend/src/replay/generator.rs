@@ -35,16 +35,28 @@ pub fn generate_replay(mut session: Session, data: RaceData) -> anyhow::Result<G
             crate::domain::TrackGeometrySource::OpenF1Location
         }
     };
-    let geometry_locations = if data.geometry_locations.is_empty() {
-        data.locations.as_slice()
+    let track_geometry = if data.geometry_locations.is_empty() {
+        // Raw location traces span the whole session; prefer a single
+        // extracted lap so the centerline covers the circuit exactly once.
+        super::track_geometry_builder::build_track_geometry_from_lap(
+            session.session_key,
+            &data,
+            geometry_source.clone(),
+        )
+        .unwrap_or_else(|| {
+            super::track_geometry_builder::build_track_geometry(
+                session.session_key,
+                data.locations.as_slice(),
+                geometry_source,
+            )
+        })
     } else {
-        data.geometry_locations.as_slice()
+        super::track_geometry_builder::build_track_geometry(
+            session.session_key,
+            data.geometry_locations.as_slice(),
+            geometry_source,
+        )
     };
-    let track_geometry = super::track_geometry_builder::build_track_geometry(
-        session.session_key,
-        geometry_locations,
-        geometry_source,
-    );
     let max_t = max_time(&data).unwrap_or(DEFAULT_DURATION_SECONDS);
     let index = super::indexed_data::ReplayDataIndex::new(&data);
     let mut snapshots = Vec::new();

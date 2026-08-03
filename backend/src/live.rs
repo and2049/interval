@@ -472,6 +472,8 @@ fn merge_live_payload(previous: Option<RawEndpoint>, mut fetched: RawEndpoint) -
         return fetched;
     };
     let Value::Array(fetched_rows) = fetched.payload else {
+        // A malformed (non-array) payload must not clobber accumulated rows.
+        fetched.payload = Value::Array(rows);
         return fetched;
     };
 
@@ -649,17 +651,27 @@ async fn live_track_geometry(
             storage::get_reusable_track_geometry_for_meeting(pool, meeting, session.session_key)
                 .await?
         {
+            storage::replace_track_geometry(pool, &geometry).await?;
             return Ok(geometry);
         }
     }
+    if let Some(geometry) = replay::track_geometry_builder::build_track_geometry_from_lap(
+        session.session_key,
+        data,
+        TrackGeometrySource::OpenF1Location,
+    ) {
+        // Persist so the map stays stable across refreshes instead of being
+        // rebuilt from a sliding telemetry window, and so later sessions at
+        // this meeting can reuse it.
+        storage::replace_track_geometry(pool, &geometry).await?;
+        return Ok(geometry);
+    }
 
+    // No clean flying lap in the window yet: use the curated/schematic
+    // fallback rather than a degenerate shape built from partial traces.
     Ok(replay::track_geometry_builder::build_track_geometry(
         session.session_key,
-        if data.geometry_locations.is_empty() {
-            &data.locations
-        } else {
-            &data.geometry_locations
-        },
+        &[],
         TrackGeometrySource::OpenF1Location,
     ))
 }

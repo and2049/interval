@@ -331,7 +331,13 @@ impl OpenF1LiveClient {
             .send()
             .await?
             .error_for_status()?;
-        Ok(response.json::<Value>().await?)
+        let payload = response.json::<Value>().await?;
+        if !payload.is_array() {
+            return Err(OpenF1LiveError::Normalize(anyhow::anyhow!(
+                "OpenF1 {endpoint} returned a non-array payload"
+            )));
+        }
+        Ok(payload)
     }
 
     fn auth_headers(&self) -> Result<HeaderMap, OpenF1LiveError> {
