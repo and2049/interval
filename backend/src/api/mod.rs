@@ -16,6 +16,7 @@ mod ingest;
 mod live;
 mod live_simulation;
 mod replay_routes;
+mod settings;
 mod stream;
 
 #[derive(Clone)]
@@ -25,6 +26,7 @@ pub struct AppState {
     pub(crate) fastf1: FastF1HistoricalClient,
     pub(crate) live: crate::live::OpenF1LiveRegistry,
     pub(crate) live_simulation: crate::live_simulation::LiveSimulationRegistry,
+    pub(crate) settings: crate::settings::SettingsStore,
 }
 
 impl AppState {
@@ -37,6 +39,7 @@ impl AppState {
                 crate::connectors::openf1_live::OpenF1LiveClient::default(),
             ),
             live_simulation: crate::live_simulation::LiveSimulationRegistry::default(),
+            settings: crate::settings::SettingsStore::default_location(),
         }
     }
 
@@ -54,6 +57,7 @@ impl AppState {
                 crate::connectors::openf1_live::OpenF1LiveClient::default(),
             ),
             live_simulation: crate::live_simulation::LiveSimulationRegistry::default(),
+            settings: crate::settings::SettingsStore::default_location(),
         }
     }
 
@@ -69,8 +73,33 @@ impl AppState {
             fastf1: FastF1HistoricalClient::default(),
             live: crate::live::OpenF1LiveRegistry::new(live_client),
             live_simulation: crate::live_simulation::LiveSimulationRegistry::default(),
+            settings: crate::settings::SettingsStore::default_location(),
         }
     }
+
+    /// Point settings at a temporary file so tests never touch the real config directory.
+    #[cfg(test)]
+    pub fn with_settings(mut self, settings: crate::settings::SettingsStore) -> Self {
+        self.settings = settings;
+        self
+    }
+}
+
+/// Settings routes, kept out of [`router`] so `main.rs` can register them only for the
+/// desktop shell and merge them *after* the permissive CORS layer.
+pub fn settings_router(state: AppState) -> Router {
+    Router::new()
+        .route(
+            "/api/settings/openf1-token",
+            get(settings::get_token)
+                .put(settings::put_token)
+                .delete(settings::delete_token),
+        )
+        .route(
+            "/api/settings/openf1-token/test",
+            post(settings::test_token),
+        )
+        .with_state(state)
 }
 
 pub fn router(state: AppState) -> Router {

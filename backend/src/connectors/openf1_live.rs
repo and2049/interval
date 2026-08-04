@@ -10,7 +10,7 @@ use reqwest::{
 };
 use serde_json::Value;
 use std::{
-    sync::Arc,
+    sync::{Arc, PoisonError, RwLock},
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -77,7 +77,13 @@ const LIVE_ENDPOINTS: &[LiveEndpointSpec] = &[
 #[derive(Clone)]
 pub struct OpenF1LiveClient {
     http: reqwest::Client,
-    config: OpenF1LiveConfig,
+    // Shared so a token saved from the settings UI reaches clones that already exist:
+    // the registry clones this client per endpoint fetch and axum clones AppState per
+    // request, but every clone descends from one instance, so they share this Arc and a
+    // live poll already in flight picks up the new token on its next request.
+    // std::sync::RwLock deliberately, not tokio's: its guard is !Send, so holding one
+    // across an await is a compile error rather than a silent bug.
+    config: Arc<RwLock<OpenF1LiveConfig>>,
     config_error: Option<String>,
     request_limiter: Arc<Mutex<LiveRequestLimiter>>,
     schedule_cache: Arc<Mutex<Option<ScheduleCacheEntry>>>,
@@ -144,9 +150,13 @@ impl OpenF1LiveClient {
             .ok()
             .filter(|value| !value.trim().is_empty());
         let (base_url, config_error) = live_base_url_from_env_value(configured_base_url);
-        let token = std::env::var("INTERVAL_OPENF1_LIVE_TOKEN")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
+        // A token saved through the settings UI takes precedence over the environment.
+        let (token, _source) = crate::settings::resolve_openf1_token(
+            crate::settings::SettingsStore::default_location()
+                .load()
+                .openf1_token,
+            std::env::var("INTERVAL_OPENF1_LIVE_TOKEN").ok(),
+        );
         let auth_header = std::env::var("INTERVAL_OPENF1_LIVE_AUTH_HEADER")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -154,12 +164,12 @@ impl OpenF1LiveClient {
 
         Self {
             http: live_http_client(),
-            config: OpenF1LiveConfig {
+            config: Arc::new(RwLock::new(OpenF1LiveConfig {
                 enabled,
                 base_url,
                 token,
                 auth_header,
-            },
+            })),
             config_error,
             request_limiter: Arc::new(Mutex::new(LiveRequestLimiter::default())),
             schedule_cache: Arc::new(Mutex::new(None)),
@@ -171,7 +181,7 @@ impl OpenF1LiveClient {
         config.base_url = with_trailing_slash(config.base_url);
         Self {
             http: live_http_client(),
-            config,
+            config: Arc::new(RwLock::new(config)),
             config_error: None,
             request_limiter: Arc::new(Mutex::new(LiveRequestLimiter::default())),
             schedule_cache: Arc::new(Mutex::new(None)),
@@ -182,7 +192,7 @@ impl OpenF1LiveClient {
     pub(crate) fn with_config_error(config: OpenF1LiveConfig, error: impl Into<String>) -> Self {
         Self {
             http: live_http_client(),
-            config,
+            config: Arc::new(RwLock::new(config)),
             config_error: Some(error.into()),
             request_limiter: Arc::new(Mutex::new(LiveRequestLimiter::default())),
             schedule_cache: Arc::new(Mutex::new(None)),
@@ -190,7 +200,43 @@ impl OpenF1LiveClient {
     }
 
     pub fn enabled(&self) -> bool {
-        self.config.enabled
+        self.config().enabled
+    }
+
+    /// Snapshot of the current config. Clones so no guard is ever held across an await.
+    fn config(&self) -> OpenF1LiveConfig {
+        self.config
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Applies a new OpenF1 token to this client and every clone of it.
+    ///
+    /// Clearing the schedule cache is not optional: it is served for up to 60 seconds,
+    /// so without this a user who fixes a bad token keeps seeing the same failure and
+    /// concludes the fix did not work.
+    pub async fn set_token(&self, token: Option<String>) {
+        self.config
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .token = token;
+        *self.schedule_cache.lock().await = None;
+    }
+
+    /// One cheap authenticated request, for the settings panel's connection test.
+    ///
+    /// `session_key=latest` returns a single row, unlike the schedule fetch which pulls
+    /// a whole year. Deliberately ignores `enabled`: "is this token valid" is a useful
+    /// question even when live discovery is switched off.
+    pub async fn probe(&self) -> Result<(), OpenF1LiveError> {
+        self.ensure_valid_config()?;
+        self.fetch_endpoint(
+            "sessions",
+            &[("session_key".to_string(), "latest".to_string())],
+        )
+        .await?;
+        Ok(())
     }
 
     pub fn endpoint_specs(&self) -> &'static [LiveEndpointSpec] {
@@ -360,7 +406,8 @@ impl OpenF1LiveClient {
         endpoint: &str,
         params: &[(String, String)],
     ) -> Result<Value, OpenF1LiveError> {
-        let mut url = self.config.base_url.join(endpoint)?;
+        let config = self.config();
+        let mut url = config.base_url.join(endpoint)?;
         url.query_pairs_mut().extend_pairs(
             params
                 .iter()
@@ -371,10 +418,17 @@ impl OpenF1LiveClient {
         let response = self
             .http
             .get(url)
-            .headers(self.auth_headers()?)
+            .headers(auth_headers(&config)?)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        // Separate rejected credentials from an unreachable API. Without this both
+        // collapse into a transport error and the UI cannot tell a bad token from
+        // OpenF1 being down.
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(OpenF1LiveError::Unauthorized(status.as_u16()));
+        }
+        let response = response.error_for_status()?;
         let payload = response.json::<Value>().await?;
         if !payload.is_array() {
             return Err(OpenF1LiveError::Normalize(anyhow::anyhow!(
@@ -384,31 +438,31 @@ impl OpenF1LiveClient {
         Ok(payload)
     }
 
-    fn auth_headers(&self) -> Result<HeaderMap, OpenF1LiveError> {
-        let mut headers = HeaderMap::new();
-        let Some(token) = &self.config.token else {
-            return Ok(headers);
-        };
-        let name = HeaderName::from_bytes(self.config.auth_header.as_bytes())
-            .map_err(|_| OpenF1LiveError::InvalidAuthHeader(self.config.auth_header.clone()))?;
-        let value = if name == AUTHORIZATION {
-            authorization_header_value(token)
-        } else {
-            token.clone()
-        };
-        headers.insert(
-            name,
-            HeaderValue::from_str(&value).map_err(|_| OpenF1LiveError::InvalidAuthHeaderValue)?,
-        );
-        Ok(headers)
-    }
-
     fn ensure_valid_config(&self) -> Result<(), OpenF1LiveError> {
         if let Some(error) = &self.config_error {
             return Err(OpenF1LiveError::Config(error.clone()));
         }
         Ok(())
     }
+}
+
+fn auth_headers(config: &OpenF1LiveConfig) -> Result<HeaderMap, OpenF1LiveError> {
+    let mut headers = HeaderMap::new();
+    let Some(token) = &config.token else {
+        return Ok(headers);
+    };
+    let name = HeaderName::from_bytes(config.auth_header.as_bytes())
+        .map_err(|_| OpenF1LiveError::InvalidAuthHeader(config.auth_header.clone()))?;
+    let value = if name == AUTHORIZATION {
+        authorization_header_value(token)
+    } else {
+        token.clone()
+    };
+    headers.insert(
+        name,
+        HeaderValue::from_str(&value).map_err(|_| OpenF1LiveError::InvalidAuthHeaderValue)?,
+    );
+    Ok(headers)
 }
 
 impl LiveRequestLimiter {
@@ -569,6 +623,8 @@ pub enum OpenF1LiveError {
     Config(String),
     #[error("invalid OpenF1 live url: {0}")]
     Url(#[from] url::ParseError),
+    #[error("OpenF1 rejected the credentials (HTTP {0})")]
+    Unauthorized(u16),
     #[error("OpenF1 live request failed: {0}")]
     Request(#[from] reqwest::Error),
     #[error("OpenF1 live normalization failed: {0}")]
@@ -774,7 +830,7 @@ mod tests {
         });
 
         assert_eq!(
-            client.config.base_url.join("sessions").unwrap().as_str(),
+            client.config().base_url.join("sessions").unwrap().as_str(),
             "https://example.test/v1/sessions"
         );
     }

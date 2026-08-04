@@ -88,10 +88,23 @@ Backend environment variables:
 - `INTERVAL_SHUTDOWN_ON_STDIN_EOF`: when set, the backend also shuts down gracefully once its standard input reaches end-of-file. This lets a supervising process stop it by closing the pipe, and guarantees it exits if that parent dies. Unset for normal terminal and deployment runs, where Ctrl-C is the only shutdown trigger; the desktop shell sets it.
 - `INTERVAL_OPENF1_LIVE_ENABLED`: OpenF1 live discovery and polling are enabled by default; set to `false`, `0`, `no`, or `off` to disable them for offline/dev runs.
 - `INTERVAL_OPENF1_LIVE_BASE_URL`: optional OpenF1-compatible live API base URL, defaults to `https://api.openf1.org/v1/`.
-- `INTERVAL_OPENF1_LIVE_TOKEN`: optional server-side live API token. With the default `Authorization` header, either `abc123` or `Bearer abc123` is accepted.
+- `INTERVAL_OPENF1_LIVE_TOKEN`: optional server-side live API token. With the default `Authorization` header, either `abc123` or `Bearer abc123` is accepted. A token saved through the settings panel takes precedence over this variable.
+- `INTERVAL_ENABLE_SETTINGS_API`: when set, exposes the settings routes under `/api/settings/`. These read and write the OpenF1 token, are exempt from the permissive CORS layer, and have no authentication, so they must stay unset on anything reachable beyond `127.0.0.1`. The desktop shell sets it; `cargo run` does not.
 - `INTERVAL_OPENF1_LIVE_AUTH_HEADER`: optional auth header name for the token, defaults to `Authorization`.
 
-For local live testing, copy `.env.example` to `.env` and put the OpenF1 sponsor token there. The backend loads `.env` on startup, and shell-provided environment variables still override it.
+For local live testing, copy `.env.example` to `.env`. The backend loads `.env` on startup, and shell-provided environment variables still override it.
+
+### Settings file
+
+The OpenF1 token is normally entered in the app's settings panel rather than an env var. It is stored outside both the repository and the app data directory, so a `cargo run` backend and an installed desktop app on the same machine share one token:
+
+| Platform | Path |
+| --- | --- |
+| Windows | `%APPDATA%\interval\settings.json` |
+| macOS | `~/Library/Application Support/interval/settings.json` |
+| Linux | `$XDG_CONFIG_HOME/interval/settings.json`, else `~/.config/interval/settings.json` |
+
+The file holds `{ "openf1_token": "..." }` and is written atomically, owner-only (`0600`) on Unix. A missing or corrupt file is ignored rather than fatal. Precedence is: a token saved here wins, otherwise `INTERVAL_OPENF1_LIVE_TOKEN` from the environment or `.env`, otherwise no token. Clearing the token in the panel falls back to the environment value. Saving through the panel applies immediately without a restart; hand-editing the file applies on next start.
 - `RUST_LOG`: tracing filter, defaults to `interval_backend=info,tower_http=info`.
 
 With OpenF1 live enabled, the frontend checks `GET /api/live/current` on startup, polls quietly while no live session is active, and keeps warmup checks responsive while OpenF1 rows are starting to publish. The selector bar shows live availability as `LIVE CHECKING`, `LIVE WAITING`, `LIVE READY`, `LIVE OPEN`, `LIVE OFF`, or `LIVE ERROR`, and the control bar exposes `OPEN LIVE` for a manual check/start. A race or sprint becomes active at its OpenF1 session start time; before that it is shown as the next live session so the app does not open live before timing/location rows exist. Once active, the backend starts an in-memory live session, polls OpenF1 channels on endpoint-specific cadences, and streams the same `ReplaySnapshot` shape used by historical replay. Reloading the app during a running backend live session reconnects through that in-memory session even if upstream discovery has a transient failure. Individual OpenF1 live HTTP requests are bounded by a request timeout so one slow endpoint cannot freeze live refresh indefinitely. `LIVE SIM` remains available as a deterministic test mode from cached historical sessions.
@@ -133,7 +146,7 @@ logs/backend.log           backend output for the current session
 Notes on the packaged app:
 
 - It starts with an **empty database** and populates it by ingesting sessions on demand. The working `interval.db` in this repository is far too large to ship.
-- To use a live OpenF1 token, put `INTERVAL_OPENF1_LIVE_TOKEN` in the `.env` inside that data directory. Any variable the shell does not set itself can be overridden there.
+- To use a live OpenF1 token, open the gear menu in the top bar and paste it there. It is written to the shared settings file described above, not to the data directory, so a `cargo run` backend on the same machine picks up the same token. The `.env` in the data directory still works for the other `INTERVAL_*` switches and is overridden by a saved token.
 - Historical ingest requires **Python on `PATH`**; the backend builds its own FastF1 virtual environment inside `cache/` on first use. Live timing and already-ingested replays work without Python.
 - Installers are unsigned. Windows shows a SmartScreen prompt on first run, and macOS reports the app as damaged unless it is opened via right-click → Open. Signing and notarization are out of scope.
 

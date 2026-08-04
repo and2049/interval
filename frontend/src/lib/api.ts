@@ -5,6 +5,8 @@ import type {
   LiveSimulationStatus,
   Meeting,
   IngestResponse,
+  OpenF1TokenProbe,
+  OpenF1TokenSettings,
   ReplayMetadata,
   ReplaySnapshot,
   ReplayEventListResponse,
@@ -187,13 +189,33 @@ export const api = {
   liveSimulationStop: (sessionKey: number) =>
     postJson<LiveSimulationStatus>(
       `/api/sessions/${positiveInteger(sessionKey, "session key")}/live-simulation/stop`
-    )
+    ),
+  // Settings routes exist only when the desktop shell enables them; these reject with a
+  // 404 in the web deployment, which is how the UI decides not to show the gear.
+  openf1Token: () => json<OpenF1TokenSettings>(OPENF1_TOKEN_URL),
+  saveOpenf1Token: (token: string) =>
+    sendJson<OpenF1TokenSettings>("PUT", OPENF1_TOKEN_URL, { token }),
+  clearOpenf1Token: () => sendJson<OpenF1TokenSettings>("DELETE", OPENF1_TOKEN_URL),
+  testOpenf1Token: () => postJson<OpenF1TokenProbe>(`${OPENF1_TOKEN_URL}/test`)
 };
 
-async function postJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { method: "POST" });
+const OPENF1_TOKEN_URL = "/api/settings/openf1-token";
+
+// Sets Content-Type only when there is a body, so bodyless calls stay CORS-simple
+// exactly as they were before this helper was generalized.
+async function sendJson<T>(method: string, url: string, body?: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method,
+    ...(body === undefined
+      ? {}
+      : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+  });
   if (!response.ok) {
     throw new Error(await apiErrorMessage(response));
   }
   return response.json() as Promise<T>;
+}
+
+function postJson<T>(url: string): Promise<T> {
+  return sendJson<T>("POST", url);
 }

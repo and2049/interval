@@ -326,3 +326,22 @@ export interface IngestResponse {
   warnings: string[];
   error: string | null;
 }
+
+export type OpenF1TokenSource = "settings" | "env" | "none";
+
+export interface OpenF1TokenSettings {
+  configured: boolean;
+  /** Masked fingerprint of the stored token. Never the token itself. */
+  hint: string | null;
+  source: OpenF1TokenSource;
+  /** True when INTERVAL_OPENF1_LIVE_TOKEN is also set. */
+  env_token_present: boolean;
+  path: string | null;
+}
+
+export type OpenF1TokenProbeResult = "ok" | "unauthorized" | "unreachable" | "invalid";
+
+export interface OpenF1TokenProbe {
+  result: OpenF1TokenProbeResult;
+  message: string;
+}

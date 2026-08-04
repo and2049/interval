@@ -76,8 +76,8 @@ function prepareDataDir(dir, resources) {
     fs.rmSync(path.join(dir, 'cache', 'fastf1-venv', '.interval-fastf1-ready'), { force: true });
   }
 
-  // Seed .env once so there is somewhere obvious to put an OpenF1 token.
-  // Never overwrite: it holds the user's credentials.
+  // Seed .env once so the remaining INTERVAL_* switches have an obvious home. The OpenF1
+  // token belongs in the settings panel now. Never overwrite: it may hold credentials.
   const envDst = path.join(dir, '.env');
   const envSrc = path.join(resources, '.env.example');
   if (!fs.existsSync(envDst) && fs.existsSync(envSrc)) fs.copyFileSync(envSrc, envDst);
@@ -99,6 +99,11 @@ function childEnv(port, resources) {
   env.INTERVAL_BIND = `127.0.0.1:${port}`;
   env.INTERVAL_STATIC_DIR = path.join(resources, 'frontend');
   env.INTERVAL_SHUTDOWN_ON_STDIN_EOF = '1';
+  // The settings routes read and write an API credential and the backend has no
+  // authentication, so they are desktop-only: they are exempt from the permissive CORS
+  // layer and must never be enabled on anything reachable beyond 127.0.0.1. The strip
+  // loop above means this cannot be forced on from the parent environment.
+  env.INTERVAL_ENABLE_SETTINGS_API = '1';
   return env;
 }
 

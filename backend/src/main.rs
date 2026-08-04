@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
     startup::rebuild_cached_replay_on_start(&pool).await?;
 
     let state = api::AppState::new(pool, HistoricalClient::default());
-    let mut app = api::router(state);
+    let mut app = api::router(state.clone());
 
     // Optional: serve a built frontend from the same origin as the API. Unset in the
     // web deployment and in local dev (Vite serves the UI there); set by the desktop
@@ -44,9 +44,21 @@ async fn main() -> anyhow::Result<()> {
         app = app.fallback_service(ServeDir::new(&dir));
     }
 
-    let app = app
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http());
+    // `Router::layer` wraps only the routes registered so far, so the settings merge
+    // below deliberately lands outside this permissive CORS layer.
+    let mut app = app.layer(CorsLayer::permissive());
+
+    // The settings routes read and write an API credential and this service has no
+    // authentication, so they exist only for the desktop shell, which sets this flag.
+    // Being outside the CORS layer means a cross-origin request gets no
+    // Access-Control-Allow-Origin and no OPTIONS handler, so the browser's preflight
+    // fails and the request is never delivered.
+    if std::env::var_os("INTERVAL_ENABLE_SETTINGS_API").is_some() {
+        tracing::info!("settings API enabled");
+        app = app.merge(api::settings_router(state));
+    }
+
+    let app = app.layer(TraceLayer::new_for_http());
 
     let addr: SocketAddr = std::env::var("INTERVAL_BIND")
         .unwrap_or_else(|_| "127.0.0.1:4000".to_string())

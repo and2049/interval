@@ -110,6 +110,41 @@ describe("api parameter validation", () => {
     });
   });
 
+  test("sends the settings token as a json body and leaves bodyless posts alone", async () => {
+    await withMockFetch(async (_calls, requests) => {
+      await api.saveOpenf1Token("abc");
+      await api.clearOpenf1Token();
+      await api.testOpenf1Token();
+      await api.liveStart(9472);
+
+      expect(requests[0]).toEqual({
+        url: "/api/settings/openf1-token",
+        method: "PUT",
+        contentType: "application/json",
+        body: '{"token":"abc"}'
+      });
+      // No body means no Content-Type, so these stay CORS-simple as before.
+      expect(requests[1]).toEqual({
+        url: "/api/settings/openf1-token",
+        method: "DELETE",
+        contentType: null,
+        body: undefined
+      });
+      expect(requests[2]).toEqual({
+        url: "/api/settings/openf1-token/test",
+        method: "POST",
+        contentType: null,
+        body: undefined
+      });
+      expect(requests[3]).toEqual({
+        url: "/api/sessions/9472/live/start",
+        method: "POST",
+        contentType: null,
+        body: undefined
+      });
+    });
+  });
+
   test("formats stream urls with start time and playback speed", () => {
     expect(api.streamUrl(9472, 12.3456, 2)).toBe(
       "/api/sessions/9472/replay/stream?from=12.346&speed=2.000"
@@ -171,16 +206,33 @@ function ingestResponse(overrides: { status?: "ready" | "failed" } = {}) {
   };
 }
 
-async function withMockFetch(run: (calls: string[]) => Promise<void>) {
+interface MockRequest {
+  url: string;
+  method: string;
+  contentType: string | null;
+  body?: string;
+}
+
+// `requests` is a second parameter so existing single-parameter callers stay unchanged.
+async function withMockFetch(
+  run: (calls: string[], requests: MockRequest[]) => Promise<void>
+) {
   const originalFetch = globalThis.fetch;
   const calls: string[] = [];
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  const requests: MockRequest[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push(input.toString());
+    requests.push({
+      url: input.toString(),
+      method: init?.method ?? "GET",
+      contentType: new Headers(init?.headers).get("content-type"),
+      body: typeof init?.body === "string" ? init.body : undefined
+    });
     return new Response(JSON.stringify({}), { status: 200, statusText: "OK" });
   }) as typeof fetch;
 
   try {
-    await run(calls);
+    await run(calls, requests);
   } finally {
     globalThis.fetch = originalFetch;
   }

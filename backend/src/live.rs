@@ -1,7 +1,7 @@
 use crate::{
     connectors::{
         openf1_historical::RawEndpoint,
-        openf1_live::{live_endpoint_cadence_seconds, OpenF1LiveClient},
+        openf1_live::{live_endpoint_cadence_seconds, OpenF1LiveClient, OpenF1LiveError},
     },
     domain::{
         DataSource, EndpointLinks, LiveAvailability, LiveChannelHealth, LiveChannelState,
@@ -73,6 +73,19 @@ impl OpenF1LiveRegistry {
             refresh_gate: Arc::new(Mutex::new(())),
             lifecycle: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Applies a new OpenF1 token to the shared client.
+    ///
+    /// A running live session is deliberately left alone: the client's config is shared,
+    /// so the session's next poll uses the new token on its own. Tearing the session down
+    /// would take the user's race off the screen for no benefit.
+    pub async fn apply_openf1_token(&self, token: Option<String>) {
+        self.client.set_token(token).await;
+    }
+
+    pub async fn probe_openf1(&self) -> Result<(), OpenF1LiveError> {
+        self.client.probe().await
     }
 
     pub async fn current(&self, pool: &SqlitePool) -> anyhow::Result<LiveCurrentResponse> {

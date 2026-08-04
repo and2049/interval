@@ -1,6 +1,7 @@
 import { batch, createEffect, createResource, createSignal, Show, untrack } from "solid-js";
 import type { IngestResponse, LiveAvailability, Session } from "../../../shared/types/api";
 import { api } from "../lib/api";
+import { SettingsMenu } from "./SettingsMenu";
 import { badgeClass, liveAvailabilityBadge } from "../lib/replayQuality";
 import {
   canOpenSessionFromCache,
@@ -254,110 +255,122 @@ export function SessionSelector(props: SessionSelectorProps) {
     });
 
   return (
+    // Split into a scrolling row plus a fixed settings cell: `overflow-x-auto` also
+    // clips vertically, so a dropdown rendered inside it would be cut off at the bar's
+    // bottom edge. Padding and font size are unchanged on the inner row, so the bar's
+    // height still matches the constant App.tsx subtracts from the viewport.
     <div
-      class="flex items-center gap-2 overflow-x-auto border-b border-line bg-[#101419] px-3 py-2 font-mono text-[0.72rem]"
+      class="flex items-center border-b border-line bg-[#101419] font-mono text-[0.72rem]"
       data-testid="session-selector"
     >
-      <SelectField
-        label="Season"
-        testId="season-select"
-        value={selectedSeason()}
-        options={seasonOptions(seasons())}
-        disabled={seasons.loading || selectorLocked()}
-        onChange={chooseSeason}
-      />
+      <div class="flex flex-1 items-center gap-2 overflow-x-auto px-3 py-2">
+        <SelectField
+          label="Season"
+          testId="season-select"
+          value={selectedSeason()}
+          options={seasonOptions(seasons())}
+          disabled={seasons.loading || selectorLocked()}
+          onChange={chooseSeason}
+        />
 
-      <SelectField
-        label="Meeting"
-        testId="meeting-select"
-        class="max-w-56 border border-line bg-panel px-2 py-1 text-slate-100 2xl:max-w-64"
-        labelClass="ml-2 text-slate-500"
-        value={selectedMeeting()}
-        options={meetingOptions(meetings())}
-        disabled={meetings.loading || selectorLocked()}
-        onChange={chooseMeeting}
-      />
+        <SelectField
+          label="Meeting"
+          testId="meeting-select"
+          class="max-w-56 border border-line bg-panel px-2 py-1 text-slate-100 2xl:max-w-64"
+          labelClass="ml-2 text-slate-500"
+          value={selectedMeeting()}
+          options={meetingOptions(meetings())}
+          disabled={meetings.loading || selectorLocked()}
+          onChange={chooseMeeting}
+        />
 
-      <SelectField
-        label="Session"
-        testId="session-select"
-        labelClass="ml-2 text-slate-500"
-        value={selectedSession()}
-        options={sessionOptions(sessions())}
-        disabled={sessions.loading || selectorLocked()}
-        onChange={chooseSession}
-      />
+        <SelectField
+          label="Session"
+          testId="session-select"
+          labelClass="ml-2 text-slate-500"
+          value={selectedSession()}
+          options={sessionOptions(sessions())}
+          disabled={sessions.loading || selectorLocked()}
+          onChange={chooseSession}
+        />
 
-      <Show when={selectedReadiness()}>
-        {(entry) => (
-          <span class={`border px-2 py-1 ${sessionStatusClass(entry().ingest_status)}`}>
-            {sessionStatusBadgeText(entry())}
-          </span>
-        )}
-      </Show>
+        <Show when={selectedReadiness()}>
+          {(entry) => (
+            <span class={`border px-2 py-1 ${sessionStatusClass(entry().ingest_status)}`}>
+              {sessionStatusBadgeText(entry())}
+            </span>
+          )}
+        </Show>
 
-      <button
-        class="ml-2 border border-mint bg-mint/10 px-3 py-1 font-semibold text-mint disabled:border-line disabled:text-slate-500"
-        data-testid="session-open"
-        disabled={
-          isSessionActionDisabled({
-            selectedSession: selectedSession(),
-            readiness: selectedReadiness(),
-            ingestState: ingestState(),
-            liveActive: props.liveActive
-          })
-        }
-        onClick={() => void openSelected("manual")}
-      >
-        {actionLabel()}
-      </button>
+        <button
+          class="ml-2 border border-mint bg-mint/10 px-3 py-1 font-semibold text-mint disabled:border-line disabled:text-slate-500"
+          data-testid="session-open"
+          disabled={
+            isSessionActionDisabled({
+              selectedSession: selectedSession(),
+              readiness: selectedReadiness(),
+              ingestState: ingestState(),
+              liveActive: props.liveActive
+            })
+          }
+          onClick={() => void openSelected("manual")}
+        >
+          {actionLabel()}
+        </button>
 
-      <button
-        class="border border-line bg-panel px-3 py-1 font-semibold text-slate-300 hover:border-mint hover:text-mint disabled:text-slate-600"
-        data-testid="live-check"
-        disabled={props.liveChecking || props.liveActive}
-        onClick={() => props.onCheckLive?.()}
-      >
-        {props.liveActive ? "LIVE OPEN" : props.liveChecking ? "CHECKING LIVE" : "OPEN LIVE"}
-      </button>
+        <button
+          class="border border-line bg-panel px-3 py-1 font-semibold text-slate-300 hover:border-mint hover:text-mint disabled:text-slate-600"
+          data-testid="live-check"
+          disabled={props.liveChecking || props.liveActive}
+          onClick={() => props.onCheckLive?.()}
+        >
+          {props.liveActive ? "LIVE OPEN" : props.liveChecking ? "CHECKING LIVE" : "OPEN LIVE"}
+        </button>
 
-      <span class={`border px-2 py-1 ${badgeClass(liveBadge().tone)}`}>
-        {liveBadge().label}
-      </span>
-
-      <Show when={sessionActionStatus(ingestState())}>
-        {(message) => <span class="text-amber">{message()}</span>}
-      </Show>
-      <Show when={props.liveActive}>
-        <span class="text-mint">Live race owns the dashboard.</span>
-      </Show>
-      <Show when={ingestState() === "failed"}>
-        <span class="text-danger">
-          {sessionIngestErrorMessage({
-            ingestError: ingestError(),
-            readiness: selectedReadiness()
-          })}
+        <span class={`border px-2 py-1 ${badgeClass(liveBadge().tone)}`}>
+          {liveBadge().label}
         </span>
-      </Show>
-      <Show when={!sessions.loading && selectedMeeting() != null && (sessions()?.length ?? 0) === 0}>
-        <span class="text-amber">No race session available for this meeting.</span>
-      </Show>
-      <Show when={latestOutcome()}>
-        {(outcome) => (
-          <span
-            class={`max-w-[28rem] truncate ${ingestOutcomeClass(outcome().tone)}`}
-            title={outcome().title}
-          >
-            {outcome().label}
+
+        <Show when={sessionActionStatus(ingestState())}>
+          {(message) => <span class="text-amber">{message()}</span>}
+        </Show>
+        <Show when={props.liveActive}>
+          <span class="text-mint">Live race owns the dashboard.</span>
+        </Show>
+        <Show when={ingestState() === "failed"}>
+          <span class="text-danger">
+            {sessionIngestErrorMessage({
+              ingestError: ingestError(),
+              readiness: selectedReadiness()
+            })}
           </span>
-        )}
-      </Show>
-      <Show when={meetings.error || sessions.error}>
-        <span class="text-danger">OpenF1 discovery failed.</span>
-      </Show>
-      <Show when={props.liveStatusMessage}>
-        {(message) => <span class="text-slate-400">{message()}</span>}
-      </Show>
+        </Show>
+        <Show when={!sessions.loading && selectedMeeting() != null && (sessions()?.length ?? 0) === 0}>
+          <span class="text-amber">No race session available for this meeting.</span>
+        </Show>
+        <Show when={latestOutcome()}>
+          {(outcome) => (
+            <span
+              class={`max-w-[28rem] truncate ${ingestOutcomeClass(outcome().tone)}`}
+              title={outcome().title}
+            >
+              {outcome().label}
+            </span>
+          )}
+        </Show>
+        <Show when={meetings.error || sessions.error}>
+          <span class="text-danger">OpenF1 discovery failed.</span>
+        </Show>
+        <Show when={props.liveStatusMessage}>
+          {(message) => <span class="text-slate-400">{message()}</span>}
+        </Show>
+      </div>
+
+      {/* self-stretch makes this cell span the bar, so the panel's `top-full` lands on
+          the bar's bottom edge instead of part-way up it. */}
+      <div class="relative flex shrink-0 items-center self-stretch px-3">
+        <SettingsMenu onTokenApplied={() => props.onCheckLive?.()} />
+      </div>
     </div>
   );
 }

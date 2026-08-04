@@ -281,3 +281,33 @@ Returns static track geometry for the selected session.
 ```
 
 For FastF1 historical replays, FastF1 telemetry geometry is preferred. Legacy OpenF1 replays still prefer OpenF1 `location` when available, then curated static geometry for known fixtures such as Bahrain, then schematic fallback. Timing order remains based on normalized position/interval records, not map projection.
+
+## Settings (desktop only)
+
+These routes are registered only when `INTERVAL_ENABLE_SETTINGS_API` is set, which the desktop shell does and the web deployment does not. They are deliberately merged outside the permissive CORS layer, so a browser on another origin cannot reach them. When the flag is unset every path below returns `404`.
+
+**No response in this section ever contains the token.** `hint` is a masked fingerprint showing at most the last four characters.
+
+`GET /api/settings/openf1-token`, `PUT /api/settings/openf1-token`, and `DELETE /api/settings/openf1-token` all return:
+
+```json
+{
+  "configured": true,
+  "hint": "••••n123",
+  "source": "settings",
+  "env_token_present": false,
+  "path": "C:\Users\me\AppData\Roaming\interval\settings.json"
+}
+```
+
+`source` is `settings`, `env`, or `none`, reflecting the precedence rule: a token saved through the panel wins over `INTERVAL_OPENF1_LIVE_TOKEN`. `env_token_present` reports whether the environment also supplies one, so a client can explain which value is in use.
+
+`PUT` takes `{ "token": "..." }`. The token is trimmed but otherwise stored verbatim, including any `Bearer ` prefix. Blank tokens and tokens that cannot be sent as an HTTP header are rejected with `400`. `DELETE` removes the saved token and falls back to the environment value.
+
+`POST /api/settings/openf1-token/test` probes the currently applied token with one request and always returns `200` — a rejected token is a successful diagnosis, not a failed request:
+
+```json
+{ "result": "unauthorized", "message": "OpenF1 rejected the token (HTTP 401)." }
+```
+
+`result` is `ok`, `unauthorized`, `unreachable`, or `invalid`.
