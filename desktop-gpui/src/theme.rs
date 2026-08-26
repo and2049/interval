@@ -19,7 +19,11 @@ fn hex(rgb: u32) -> Hsla {
 // has since moved to a greyscale scheme — the web frontend's mint/lime accents are
 // retired, and only functional colors (amber warnings, red danger, team/tyre colors)
 // stay chromatic.
-pub const CARBON: fn() -> Hsla = || hex(0x111418); // window background
+// The only three surfaces: the window ground (also every top bar), the panel/card/
+// control fill, and the raised header/hover shade. The web port's per-component
+// bar/card/header hexes (BAR_BG, BAR_BG_DEEP, STINT_CARD, TIMING_HEADER) collapsed
+// into these.
+pub const CARBON: fn() -> Hsla = || hex(0x111418);
 pub const PANEL: fn() -> Hsla = || hex(0x191d23);
 pub const PANEL_HI: fn() -> Hsla = || hex(0x232a32);
 pub const LINE: fn() -> Hsla = || hex(0x3a424d);
@@ -30,11 +34,6 @@ pub const DANGER: fn() -> Hsla = || hex(0xff4b4b);
 /// Timing values (gaps, lap times): near-white (was the web frontend's lime).
 pub const TIMING: fn() -> Hsla = || hex(0xdde3ea);
 
-// Literal hexes carried over from component markup.
-pub const BAR_BG: fn() -> Hsla = || hex(0x15191f); // selector/controls bars
-pub const BAR_BG_DEEP: fn() -> Hsla = || hex(0x101419);
-pub const STINT_CARD: fn() -> Hsla = || hex(0x151a20);
-pub const TIMING_HEADER: fn() -> Hsla = || hex(0x20262e);
 pub const TEXT: fn() -> Hsla = || hex(0xf7fbff);
 pub const LEADER_HALO: fn() -> Hsla = || hex(0xf5d547);
 

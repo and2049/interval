@@ -86,7 +86,7 @@ pub fn replay_controls(
                     el.border_color(theme::LINE())
                 } else if accent {
                     el.border_color(theme::ACCENT())
-                        .bg(theme::blend(theme::ACCENT(), theme::BAR_BG(), 0.1))
+                        .bg(theme::blend(theme::ACCENT(), theme::CARBON(), 0.1))
                 } else {
                     el.border_color(theme::LINE())
                         .cursor_pointer()
@@ -115,7 +115,7 @@ pub fn replay_controls(
             .w_full()
             .border_b_1()
             .border_color(theme::LINE())
-            .bg(theme::BAR_BG())
+            .bg(theme::CARBON())
             .px_3()
             .py(px(6.0))
             .font_family(app.mono_font.clone())
@@ -176,7 +176,7 @@ pub fn replay_controls(
                                 .text_size(rems(0.65))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .border_color(theme::DANGER())
-                                .bg(theme::blend(theme::DANGER(), theme::BAR_BG(), 0.1))
+                                .bg(theme::blend(theme::DANGER(), theme::CARBON(), 0.1))
                                 .text_color(theme::DANGER())
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _, _window, _cx| {
@@ -214,7 +214,7 @@ pub fn replay_controls(
                                     el.border_color(theme::DANGER())
                                         .bg(theme::blend(
                                             theme::DANGER(),
-                                            theme::BAR_BG(),
+                                            theme::CARBON(),
                                             0.1,
                                         ))
                                         .text_color(theme::DANGER())

@@ -6,7 +6,7 @@ use gpui::{AnyElement, Context, Div, Hsla, Window, div, prelude::*, px, rems};
 use interval_backend::domain::{DriverStatus, SectorStatus, TyreCompound};
 use interval_desktop_core::formatters;
 
-use super::side_panels::{panel, tone_color};
+use super::side_panels::panel;
 use super::ui;
 use crate::{IntervalApp, theme};
 
@@ -122,7 +122,7 @@ fn lap_metric(time: Option<f64>, status: &SectorStatus) -> (String, Hsla) {
 }
 
 fn stint_card(card: &CardData, total_laps: i32) -> Div {
-    let compound_colour = tone_color(formatters::compound_class(&card.compound));
+    let compound_colour = ui::tone_color(formatters::compound_class(&card.compound));
     let age_label = card
         .stint_age
         .map(|age| format!("{age} laps"))
@@ -148,7 +148,7 @@ fn stint_card(card: &CardData, total_laps: i32) -> Div {
     div()
         .border_1()
         .border_color(theme::LINE())
-        .bg(theme::STINT_CARD())
+        .bg(theme::PANEL())
         .p_2()
         .text_size(rems(0.7))
         // Header: driver identity + tyre on the left, state marker on the right.

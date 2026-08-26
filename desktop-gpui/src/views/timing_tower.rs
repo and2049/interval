@@ -3,7 +3,7 @@
 
 use gpui::{Context, Hsla, Window, div, prelude::*, rems, uniform_list};
 use interval_backend::domain::DriverSnapshot;
-use interval_desktop_core::formatters::{self, Tone};
+use interval_desktop_core::formatters;
 use interval_desktop_core::timing_display;
 
 use super::ui;
@@ -17,33 +17,8 @@ const HEADERS: [&str; 9] = ["P", "DRV", "GAP", "INT", "S1", "S2", "S3", "LAP", "
 /// `.timing-cell` min-height, doubling as the uniform row height.
 const ROW_HEIGHT: f32 = 1.65;
 
-// Tailwind literals the web component's classes referenced directly.
-const FUCHSIA: fn() -> Hsla = || gpui::rgb(0xe879f9).into();
-const EMERALD: fn() -> Hsla = || gpui::rgb(0x34d399).into();
-const SKY: fn() -> Hsla = || gpui::rgb(0x38bdf8).into();
-const SLATE_100: fn() -> Hsla = || gpui::rgb(0xf1f5f9).into();
-const SLATE_200: fn() -> Hsla = || gpui::rgb(0xe2e8f0).into();
-const SLATE_300: fn() -> Hsla = || gpui::rgb(0xcbd5e1).into();
-
 /// Lime marks a sub-second interval (DRS range); the pace palette lives in `ui`.
 const DRS_LIME: fn() -> Hsla = || gpui::rgb(0xd7e34d).into();
-
-/// The concrete color for a [`Tone`] — the CSS class strings the TS formatters
-/// returned, resolved against the theme.
-fn tone_color(tone: Tone) -> Hsla {
-    match tone {
-        Tone::Fuchsia => FUCHSIA(),
-        Tone::Mint => theme::ACCENT(),
-        Tone::Timing => theme::TIMING(),
-        Tone::Danger => theme::DANGER(),
-        Tone::Amber => theme::AMBER(),
-        Tone::Bright => SLATE_100(),
-        Tone::Emerald => EMERALD(),
-        Tone::Sky => SKY(),
-        Tone::Neutral => SLATE_300(),
-        Tone::Muted => ui::muted(),
-    }
-}
 
 /// One `.timing-cell`: fixed width, row height, `0.35rem` side padding, and the
 /// half-strength hairline (`rgba(58,66,77,0.55)` — LINE at 0.55 over the panel).
@@ -65,7 +40,7 @@ fn cell(width: f32) -> gpui::Div {
 /// to the faint grey so the row recedes without losing its slot.
 fn timing_row(ix: usize, row: &DriverSnapshot, dimmed: bool) -> impl IntoElement + use<> {
     let paint = move |color: Hsla| if dimmed { ui::faint() } else { color };
-    let compound_tone = paint(tone_color(formatters::compound_class(&row.compound)));
+    let compound_tone = paint(ui::tone_color(formatters::compound_class(&row.compound)));
     div()
         .id(ix)
         .flex()
@@ -109,7 +84,7 @@ fn timing_row(ix: usize, row: &DriverSnapshot, dimmed: bool) -> impl IntoElement
                     if timing_display::interval_within_one_second(row.interval.as_deref()) {
                         DRS_LIME()
                     } else {
-                        SLATE_200()
+                        theme::TIMING()
                     },
                 ))
                 .child(timing_display::interval_label(row.interval.as_deref()).to_string()),
@@ -208,8 +183,8 @@ pub fn timing_tower(
                         .flex()
                         .flex_row()
                         .flex_shrink_0()
-                        .bg(theme::TIMING_HEADER())
-                        .text_color(SLATE_300())
+                        .bg(theme::PANEL_HI())
+                        .text_color(theme::ACCENT())
                         .children(COLUMNS.iter().zip(HEADERS).map(|(width, label)| {
                             cell(*width)
                                 .border_color(theme::LINE())

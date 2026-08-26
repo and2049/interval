@@ -4,10 +4,10 @@
 use gpui::{AnyElement, Context, Div, Hsla, Window, div, prelude::*, px, rems};
 use interval_backend::domain::{RaceControlMessage, ReplayEvent};
 use interval_desktop_core::derived_metrics::{DerivedMetricDisplay, derived_metric_rows};
-use interval_desktop_core::formatters::{self, Tone};
+use interval_desktop_core::formatters;
 use interval_desktop_core::replay_events::{
     EventFeedState, event_feed_empty_label, event_feed_state, event_kind_label,
-    event_severity_class, recent_replay_events,
+    event_message_label, event_severity_class, race_control_display, recent_replay_events,
 };
 use interval_desktop_core::weather_display::{
     WeatherMetricDisplay, has_weather_sample, weather_metrics,
@@ -15,23 +15,6 @@ use interval_desktop_core::weather_display::{
 
 use super::ui;
 use crate::{IntervalApp, theme};
-
-/// Concrete colors for `formatters::Tone`. Tailwind hexes for the classes outside the
-/// theme palette (fuchsia/emerald/sky/slate).
-pub(crate) fn tone_color(tone: Tone) -> Hsla {
-    match tone {
-        Tone::Fuchsia => gpui::rgb(0xe879f9).into(),
-        Tone::Mint => theme::ACCENT(),
-        Tone::Timing => theme::TIMING(),
-        Tone::Danger => theme::DANGER(),
-        Tone::Amber => theme::AMBER(),
-        Tone::Bright => theme::TEXT(),
-        Tone::Emerald => gpui::rgb(0x34d399).into(),
-        Tone::Sky => gpui::rgb(0x38bdf8).into(),
-        Tone::Neutral => theme::blend(theme::TEXT(), theme::CARBON(), 0.78),
-        Tone::Muted => ui::muted(),
-    }
-}
 
 /// The `.panel` section frame with a slim uppercase mono header — deliberately lower
 /// profile than the web `Panel.tsx` (which spent a 2rem bar plus a quality badge on it).
@@ -158,25 +141,18 @@ fn race_control_body(messages: &[RaceControlMessage]) -> AnyElement {
         .p_2()
         .text_size(rems(0.7))
         .children(messages.iter().map(|event| {
+            let (label, tone) = race_control_display(event);
             div()
                 .mb_2()
                 .pb_2()
                 .border_b_1()
                 .border_color(separator(0.7))
-                .child(div().text_color(ui::muted()).child(format!(
-                    "{} · {}",
-                    formatters::format_event_clock(event.t),
-                    event.category
-                )))
                 .child(
                     div()
-                        .text_color(if event.flag.as_deref() == Some("yellow") {
-                            theme::AMBER()
-                        } else {
-                            theme::TEXT()
-                        })
-                        .child(event.message.clone()),
+                        .text_color(ui::muted())
+                        .child(formatters::format_event_clock(event.t)),
                 )
+                .child(div().text_color(ui::tone_color(tone)).child(label))
         }))
         .into_any_element()
 }
@@ -212,7 +188,7 @@ fn event_feed_body(events: &[ReplayEvent], state: EventFeedState) -> AnyElement 
                         .child(div().child(formatters::format_event_clock(event.t)))
                         .child(
                             div()
-                                .text_color(tone_color(event_severity_class(&event.severity)))
+                                .text_color(ui::tone_color(event_severity_class(&event.severity)))
                                 .child(event_kind_label(&event.kind)),
                         ),
                 )
@@ -220,7 +196,7 @@ fn event_feed_body(events: &[ReplayEvent], state: EventFeedState) -> AnyElement 
                     div()
                         .mt(px(2.0))
                         .text_color(theme::TEXT())
-                        .child(event.message.clone()),
+                        .child(event_message_label(event)),
                 )
         }))
         .into_any_element()
@@ -292,7 +268,7 @@ fn derived_body(rows: &[DerivedMetricDisplay]) -> AnyElement {
                     div()
                         .flex_none()
                         .w(rems(4.0))
-                        .text_color(tone_color(formatters::trend_class(&row.trend)))
+                        .text_color(ui::tone_color(formatters::trend_class(&row.trend)))
                         .child(row.value.clone()),
                 )
         }))

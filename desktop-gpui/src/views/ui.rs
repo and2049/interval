@@ -4,6 +4,7 @@
 
 use gpui::{Context, Hsla, SharedString, Window, div, prelude::*, px, rems};
 use interval_backend::domain::SectorStatus;
+use interval_desktop_core::formatters::Tone;
 use interval_desktop_core::replay_quality::{BadgeTone, ChannelBadge};
 use interval_desktop_core::session_readiness;
 
@@ -23,6 +24,24 @@ pub fn pace_color(status: &SectorStatus) -> Hsla {
         SectorStatus::PersonalBest => PACE_GREEN(),
         SectorStatus::Normal => PACE_YELLOW(),
         SectorStatus::Unknown => theme::TIMING(),
+    }
+}
+
+/// The one `formatters::Tone` → color mapping, shared by every view. Chromatic hexes
+/// are functional only (severity fuchsia, inter/wet tyre green/blue); everything else
+/// resolves to a theme token so the greyscale stays consistent.
+pub fn tone_color(tone: Tone) -> Hsla {
+    match tone {
+        Tone::Fuchsia => gpui::rgb(0xe879f9).into(),
+        Tone::Mint => theme::ACCENT(),
+        Tone::Timing => theme::TIMING(),
+        Tone::Danger => theme::DANGER(),
+        Tone::Amber => theme::AMBER(),
+        Tone::Bright => theme::TEXT(),
+        Tone::Emerald => gpui::rgb(0x34d399).into(),
+        Tone::Sky => gpui::rgb(0x38bdf8).into(),
+        Tone::Neutral => theme::blend(theme::TEXT(), theme::CARBON(), 0.78),
+        Tone::Muted => muted(),
     }
 }
 
@@ -66,7 +85,7 @@ pub fn readiness_tone_color(tone: session_readiness::Tone) -> Hsla {
 pub fn badge(label: impl Into<SharedString>, color: Hsla) -> gpui::Div {
     div()
         .border_1()
-        .border_color(theme::blend(color, theme::BAR_BG_DEEP(), 0.4))
+        .border_color(theme::blend(color, theme::CARBON(), 0.4))
         .text_color(color)
         .px(px(8.0))
         .py(px(2.0))

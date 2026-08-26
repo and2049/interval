@@ -52,7 +52,7 @@ pub fn titlebar(
         .flex_row()
         .items_center()
         .justify_between()
-        .bg(theme::BAR_BG())
+        .bg(theme::CARBON())
         .map(|el| {
             if fullscreen {
                 el.pl_3()
@@ -163,7 +163,7 @@ fn caption_button(
     let hover_bg: gpui::Hsla = if close {
         theme::CLOSE_RED()
     } else {
-        theme::blend(theme::TEXT(), theme::BAR_BG(), 0.08)
+        theme::blend(theme::TEXT(), theme::CARBON(), 0.08)
     };
     div()
         .id(id)

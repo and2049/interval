@@ -1,7 +1,7 @@
 //! Port of `frontend/src/lib/replayEvents.ts`.
 
 use crate::formatters::Tone;
-use interval_backend::domain::{EventKind, EventSeverity, ReplayEvent};
+use interval_backend::domain::{EventKind, EventSeverity, RaceControlMessage, ReplayEvent};
 
 pub const DEFAULT_EVENT_LIMIT: usize = 6;
 
@@ -44,6 +44,72 @@ pub fn event_severity_class(severity: &EventSeverity) -> Tone {
         EventSeverity::Warning => Tone::Amber,
         EventSeverity::Notice => Tone::Mint,
         EventSeverity::Info => Tone::Neutral,
+    }
+}
+
+/// Human label for a normalized track-status flag — the FastF1 status codes the export
+/// script resolves (1 clear, 2 yellow, 4 safety car, 5 red, 6 VSC, 7 VSC ending).
+pub fn flag_label(flag: &str) -> Option<&'static str> {
+    match flag {
+        "green" => Some("TRACK CLEAR"),
+        "yellow" => Some("YELLOW FLAG"),
+        "red" => Some("RED FLAG"),
+        "safety_car" => Some("SAFETY CAR"),
+        "virtual_safety_car" => Some("VIRTUAL SAFETY CAR"),
+        "virtual_safety_car_ending" => Some("VSC ENDING"),
+        _ => None,
+    }
+}
+
+pub fn flag_tone(flag: &str) -> Tone {
+    match flag {
+        "green" => Tone::Emerald,
+        "yellow" | "safety_car" | "virtual_safety_car" | "virtual_safety_car_ending" => Tone::Amber,
+        "red" => Tone::Danger,
+        _ => Tone::Bright,
+    }
+}
+
+/// Display line for a race-control entry. Track-status rows carry a machine message
+/// ("Track status 2"), so those render as the flag condition itself; real steward
+/// messages pass through verbatim, toned by their flag when one is attached.
+pub fn race_control_display(message: &RaceControlMessage) -> (String, Tone) {
+    match message.flag.as_deref() {
+        Some(flag) => {
+            let label = match flag_label(flag) {
+                Some(label) if message.category == "track_status" => label.to_string(),
+                _ => message.message.clone(),
+            };
+            (label, flag_tone(flag))
+        }
+        None => (message.message.clone(), Tone::Bright),
+    }
+}
+
+/// Feed message with the same track-status translation: `TrackStatus` events carry the
+/// bare flag value, `RaceControl` events echo the source row (whose category/flag ride
+/// along in the payload); everything else shows its message untouched.
+pub fn event_message_label(event: &ReplayEvent) -> String {
+    match event.kind {
+        EventKind::TrackStatus => flag_label(&event.message)
+            .map(str::to_string)
+            .unwrap_or_else(|| event.message.clone()),
+        EventKind::RaceControl => {
+            let payload_str = |key: &str| {
+                event
+                    .payload
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            };
+            match (payload_str("category"), payload_str("flag")) {
+                (Some(category), Some(flag)) if category == "track_status" => flag_label(&flag)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| event.message.clone()),
+                _ => event.message.clone(),
+            }
+        }
+        _ => event.message.clone(),
     }
 }
 
@@ -122,6 +188,67 @@ mod tests {
         assert_eq!(event_severity_class(&EventSeverity::Warning), Tone::Amber);
         assert_eq!(event_severity_class(&EventSeverity::Notice), Tone::Mint);
         assert_eq!(event_severity_class(&EventSeverity::Info), Tone::Neutral);
+    }
+
+    fn rc(category: &str, message: &str, flag: Option<&str>) -> RaceControlMessage {
+        RaceControlMessage {
+            t: 10.0,
+            category: category.to_string(),
+            message: message.to_string(),
+            flag: flag.map(str::to_string),
+            scope: None,
+        }
+    }
+
+    #[test]
+    fn track_status_rows_render_as_flag_conditions() {
+        assert_eq!(
+            race_control_display(&rc("track_status", "Track status 1", Some("green"))),
+            ("TRACK CLEAR".to_string(), Tone::Emerald)
+        );
+        assert_eq!(
+            race_control_display(&rc("track_status", "Track status 2", Some("yellow"))),
+            ("YELLOW FLAG".to_string(), Tone::Amber)
+        );
+        assert_eq!(
+            race_control_display(&rc("track_status", "Track status 5", Some("red"))),
+            ("RED FLAG".to_string(), Tone::Danger)
+        );
+        // Unknown raw code: no flag mapping, so the raw message stays visible.
+        assert_eq!(
+            race_control_display(&rc("track_status", "Track status 9", Some("9"))),
+            ("Track status 9".to_string(), Tone::Bright)
+        );
+    }
+
+    #[test]
+    fn steward_messages_pass_through_toned_by_their_flag() {
+        assert_eq!(
+            race_control_display(&rc("Flag", "YELLOW IN TRACK SECTOR 7", Some("yellow"))),
+            ("YELLOW IN TRACK SECTOR 7".to_string(), Tone::Amber)
+        );
+        assert_eq!(
+            race_control_display(&rc("Other", "CAR 4 (NOR) TIME DELETED", None)),
+            ("CAR 4 (NOR) TIME DELETED".to_string(), Tone::Bright)
+        );
+    }
+
+    #[test]
+    fn feed_messages_translate_track_status_via_kind_and_payload() {
+        let mut track_status = event("green", 10.0);
+        track_status.kind = EventKind::TrackStatus;
+        assert_eq!(event_message_label(&track_status), "TRACK CLEAR");
+
+        let mut race_control = event("Track status 2", 10.0);
+        race_control.payload =
+            serde_json::to_value(rc("track_status", "Track status 2", Some("yellow"))).unwrap();
+        assert_eq!(event_message_label(&race_control), "YELLOW FLAG");
+
+        // A steward message keeps its text even though a flag rides in the payload.
+        let mut steward = event("YELLOW IN TRACK SECTOR 7", 10.0);
+        steward.payload =
+            serde_json::to_value(rc("Flag", "YELLOW IN TRACK SECTOR 7", Some("yellow"))).unwrap();
+        assert_eq!(event_message_label(&steward), "YELLOW IN TRACK SECTOR 7");
     }
 
     #[test]

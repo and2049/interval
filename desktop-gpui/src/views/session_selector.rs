@@ -123,7 +123,7 @@ pub fn session_selector(
         .w_full()
         .border_b_1()
         .border_color(theme::LINE())
-        .bg(theme::BAR_BG_DEEP())
+        .bg(theme::CARBON())
         .px_3()
         .py_2()
         .font_family(app.mono_font.clone())
@@ -179,7 +179,7 @@ pub fn session_selector(
                         el.border_color(theme::LINE()).text_color(ui::faint())
                     } else {
                         el.border_color(theme::ACCENT())
-                            .bg(theme::blend(theme::ACCENT(), theme::BAR_BG_DEEP(), 0.1))
+                            .bg(theme::blend(theme::ACCENT(), theme::CARBON(), 0.1))
                             .text_color(theme::ACCENT())
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _window, _cx| {
