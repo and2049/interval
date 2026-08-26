@@ -1,0 +1,56 @@
+name: desktop-gpui
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: interval-desktop-linux
+            binary: interval-desktop
+          - os: windows-latest
+            artifact: interval-desktop-windows
+            binary: interval-desktop.exe
+          - os: macos-latest
+            artifact: interval-desktop-macos
+            binary: interval-desktop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel; this action just ensures rustup honors it.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev
+
+      - name: Test core crates
+        run: cargo test -p interval-backend -p interval-desktop-core
+
+      - name: Build
+        run: cargo build --release -p interval-desktop
+
+      # gpui_platform's backends are all feature-gated with default = [], so a wrong
+      # feature list still compiles cleanly into a binary that cannot open a window.
+      # Linking libxkbcommon proves the wayland/x11 backends are actually present.
+      - name: Assert the Linux GUI backend is linked
+        if: runner.os == 'Linux'
+        run: ldd target/release/interval-desktop | grep -q libxkbcommon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/release/${{ matrix.binary }}

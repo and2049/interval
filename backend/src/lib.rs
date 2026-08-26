@@ -7,6 +7,7 @@ pub mod live;
 pub mod live_simulation;
 pub mod normalization;
 pub mod replay;
+pub mod server;
 pub mod settings;
 pub mod startup;
 pub mod storage;

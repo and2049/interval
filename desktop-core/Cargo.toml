@@ -1,0 +1,20 @@
+[package]
+name = "interval-desktop-core"
+version = "0.1.0"
+# Newer than the backend's workspace-wide 2021: this crate is new code with no
+# migration cost, and it matches what the gpui frontend crate uses.
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+# Wire types come straight from the backend's `domain` module — no mirrored copies.
+interval-backend = { path = "../backend" }
+
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots", "stream"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"

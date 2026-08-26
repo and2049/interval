@@ -17,6 +17,11 @@ const REQUIREMENTS_PATH: &str = "scripts/fastf1-requirements.txt";
 const DEFAULT_CACHE_DIR: &str = "cache/fastf1";
 const DEFAULT_VENV_DIR: &str = "cache/fastf1-venv";
 const READY_SENTINEL: &str = ".interval-fastf1-ready";
+const STDERR_LOG: &str = "cache/fastf1-stderr.log";
+/// Pinned rather than "latest available": fastf1/numpy/pandas wheels are known-good on
+/// this minor, and uv downloads a managed CPython of exactly this version when the host
+/// has none — so every install runs the same interpreter we tested.
+const UV_PYTHON_VERSION: &str = "3.12";
 
 /// Most macOS and Linux installs expose only `python3`; Windows uses `python`.
 fn default_bootstrap_python() -> &'static str {
@@ -31,6 +36,7 @@ fn default_bootstrap_python() -> &'static str {
 pub struct FastF1HistoricalClient {
     root: PathBuf,
     python_override: Option<PathBuf>,
+    uv_override: Option<PathBuf>,
     bootstrap_python: String,
     timeout: Duration,
 }
@@ -40,6 +46,10 @@ impl Default for FastF1HistoricalClient {
         Self {
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             python_override: std::env::var("INTERVAL_FASTF1_PYTHON")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
+            uv_override: std::env::var("INTERVAL_FASTF1_UV")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
@@ -61,6 +71,7 @@ impl FastF1HistoricalClient {
         Self {
             root,
             python_override,
+            uv_override: None,
             bootstrap_python: "python".to_string(),
             timeout: Duration::from_secs(30),
         }
@@ -74,6 +85,7 @@ impl FastF1HistoricalClient {
         let config = FastF1SessionConfig::for_session(session, meeting)?;
         let root = self.root.clone();
         let python_override = self.python_override.clone();
+        let uv_override = self.uv_override.clone();
         let bootstrap_python = self.bootstrap_python.clone();
         let timeout = self.timeout;
         let session_key = session.session_key;
@@ -81,7 +93,7 @@ impl FastF1HistoricalClient {
         tokio::task::spawn_blocking(move || {
             let python = match python_override {
                 Some(path) => path,
-                None => ensure_managed_python(&root, &bootstrap_python)?,
+                None => ensure_managed_python(&root, uv_override.as_deref(), &bootstrap_python)?,
             };
             let output_path = root
                 .join("cache")
@@ -129,7 +141,7 @@ impl FastF1HistoricalClient {
                 }
             }
 
-            let output = run_command(command, timeout)?;
+            let output = run_command(command, timeout, &root.join(STDERR_LOG))?;
             if !output.status.success() {
                 return Err(FastF1HistoricalError::CommandFailed {
                     program: python.display().to_string(),
@@ -147,6 +159,7 @@ impl FastF1HistoricalClient {
 
 fn ensure_managed_python(
     root: &Path,
+    uv: Option<&Path>,
     bootstrap_python: &str,
 ) -> Result<PathBuf, FastF1HistoricalError> {
     let venv_dir = root.join(DEFAULT_VENV_DIR);
@@ -155,41 +168,122 @@ fn ensure_managed_python(
     if sentinel.exists() && python.exists() {
         return Ok(python);
     }
+    let stderr_log = root.join(STDERR_LOG);
 
     if !venv_dir.exists() {
-        let mut create = Command::new(bootstrap_python);
-        create
-            .current_dir(root)
-            .arg("-m")
-            .arg("venv")
-            .arg(&venv_dir);
-        let output = run_command(create, Duration::from_secs(120))?;
+        let (create, program, timeout) = match uv {
+            // uv may first have to download a managed CPython, so it gets the long
+            // timeout; `python -m venv` is purely local.
+            Some(uv) => (
+                uv_venv_command(root, uv, &venv_dir),
+                uv.display().to_string(),
+                Duration::from_secs(600),
+            ),
+            None => (
+                python_venv_command(root, bootstrap_python, &venv_dir),
+                bootstrap_python.to_string(),
+                Duration::from_secs(120),
+            ),
+        };
+        let output = run_command(create, timeout, &stderr_log)?;
         if !output.status.success() {
             return Err(FastF1HistoricalError::CommandFailed {
-                program: bootstrap_python.to_string(),
+                program,
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
             });
         }
     }
 
-    let mut install = Command::new(&python);
-    install
+    let (install, program) = match uv {
+        Some(uv) => (
+            uv_pip_install_command(root, uv, &python),
+            uv.display().to_string(),
+        ),
+        None => (pip_install_command(root, &python), python.display().to_string()),
+    };
+    let output = run_command(install, Duration::from_secs(900), &stderr_log)?;
+    if !output.status.success() {
+        return Err(FastF1HistoricalError::CommandFailed {
+            program,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
+    fs::write(sentinel, "ready\n")?;
+
+    // Best-effort: uv's wheel cache holds hundreds of MB the venv no longer needs —
+    // installed files are hardlinks, so they survive the clean. A failure here only
+    // costs disk space.
+    if let Some(uv) = uv {
+        let mut clean = Command::new(uv);
+        clean.current_dir(root).arg("cache").arg("clean");
+        apply_uv_env(&mut clean, root);
+        let _ = run_command(clean, Duration::from_secs(120), &stderr_log);
+    }
+
+    Ok(python)
+}
+
+fn python_venv_command(root: &Path, bootstrap_python: &str, venv_dir: &Path) -> Command {
+    let mut command = Command::new(bootstrap_python);
+    command
+        .current_dir(root)
+        .arg("-m")
+        .arg("venv")
+        .arg(venv_dir);
+    command
+}
+
+fn pip_install_command(root: &Path, python: &Path) -> Command {
+    let mut command = Command::new(python);
+    command
         .current_dir(root)
         .arg("-m")
         .arg("pip")
         .arg("install")
         .arg("-r")
         .arg(REQUIREMENTS_PATH);
-    let output = run_command(install, Duration::from_secs(900))?;
-    if !output.status.success() {
-        return Err(FastF1HistoricalError::CommandFailed {
-            program: python.display().to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        });
-    }
+    command
+}
 
-    fs::write(sentinel, "ready\n")?;
-    Ok(python)
+fn uv_venv_command(root: &Path, uv: &Path, venv_dir: &Path) -> Command {
+    let mut command = Command::new(uv);
+    command
+        .current_dir(root)
+        .arg("venv")
+        .arg("--python")
+        .arg(UV_PYTHON_VERSION)
+        .arg(venv_dir);
+    apply_uv_env(&mut command, root);
+    command
+}
+
+fn uv_pip_install_command(root: &Path, uv: &Path, venv_python: &Path) -> Command {
+    let mut command = Command::new(uv);
+    command
+        .current_dir(root)
+        .arg("pip")
+        .arg("install")
+        .arg("--python")
+        .arg(venv_python)
+        .arg("-r")
+        .arg(REQUIREMENTS_PATH);
+    apply_uv_env(&mut command, root);
+    command
+}
+
+/// Keep uv fully self-contained under the backend's own `cache/`: its download cache
+/// and managed CPython land next to the venv instead of in the user's home,
+/// `UV_NO_CONFIG` stops a user-level `uv.toml` (custom indexes, constraints) from
+/// steering what this app installs, and `only-managed` refuses whatever Python the
+/// machine happens to have — every install runs the exact interpreter we test against,
+/// which is the point of shipping uv in the first place.
+fn apply_uv_env(command: &mut Command, root: &Path) {
+    command
+        .env("UV_CACHE_DIR", root.join("cache").join("uv"))
+        .env("UV_PYTHON_INSTALL_DIR", root.join("cache").join("uv-python"))
+        .env("UV_PYTHON_PREFERENCE", "only-managed")
+        .env("UV_NO_CONFIG", "1");
 }
 
 #[cfg(windows)]
@@ -202,15 +296,26 @@ fn venv_python(venv_dir: &Path) -> PathBuf {
     venv_dir.join("bin").join("python")
 }
 
+/// Runs to completion with a timeout, capturing stderr via a file rather than a pipe:
+/// FastF1 streams progress bars to stderr, and an unread pipe would fill and deadlock
+/// the child. The file contents are folded back into `Output::stderr` (tail-capped) so
+/// callers see real tracebacks in `CommandFailed` instead of an empty string.
 fn run_command(
     mut command: Command,
     timeout: Duration,
+    stderr_log: &Path,
 ) -> Result<std::process::Output, FastF1HistoricalError> {
+    if let Some(parent) = stderr_log.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    command.stderr(fs::File::create(stderr_log)?);
     let started = std::time::Instant::now();
     let mut child = command.spawn()?;
     loop {
         if let Some(_status) = child.try_wait()? {
-            return Ok(child.wait_with_output()?);
+            let mut output = child.wait_with_output()?;
+            output.stderr = read_tail(stderr_log, 8 * 1024);
+            return Ok(output);
         }
         if started.elapsed() >= timeout {
             let _ = child.kill();
@@ -219,6 +324,14 @@ fn run_command(
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+fn read_tail(path: &Path, max_bytes: usize) -> Vec<u8> {
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    let start = bytes.len().saturating_sub(max_bytes);
+    bytes[start..].to_vec()
 }
 
 fn bundle_from_export(
@@ -351,6 +464,109 @@ pub enum FastF1HistoricalError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Unique per test name; removed manually at the end of each test that uses it.
+    fn scratch_dir(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join("interval-fastf1-tests")
+            .join(format!("{test}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn uv_commands_pin_python_and_stay_self_contained() {
+        let root = Path::new("/data");
+        let uv = Path::new("/data/bin/uv");
+        let venv_dir = root.join(DEFAULT_VENV_DIR);
+
+        let create = uv_venv_command(root, uv, &venv_dir);
+        let args: Vec<String> = create
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[..3], ["venv", "--python", UV_PYTHON_VERSION]);
+        assert_eq!(args[3], venv_dir.display().to_string());
+
+        let install = uv_pip_install_command(root, uv, &venv_python(&venv_dir));
+        let args: Vec<String> = install
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[..2], ["pip", "install"]);
+        assert!(args.contains(&"-r".to_string()));
+        assert!(args.contains(&REQUIREMENTS_PATH.to_string()));
+
+        for command in [&create, &install] {
+            let envs: std::collections::HashMap<String, String> = command
+                .get_envs()
+                .filter_map(|(key, value)| {
+                    Some((
+                        key.to_string_lossy().into_owned(),
+                        value?.to_string_lossy().into_owned(),
+                    ))
+                })
+                .collect();
+            assert_eq!(
+                envs.get("UV_CACHE_DIR").map(String::as_str),
+                Some(root.join("cache").join("uv").to_str().unwrap())
+            );
+            assert_eq!(
+                envs.get("UV_PYTHON_INSTALL_DIR").map(String::as_str),
+                Some(root.join("cache").join("uv-python").to_str().unwrap())
+            );
+            assert_eq!(envs.get("UV_NO_CONFIG").map(String::as_str), Some("1"));
+            assert_eq!(
+                envs.get("UV_PYTHON_PREFERENCE").map(String::as_str),
+                Some("only-managed")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_managed_python_bootstraps_via_uv_when_provided() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch_dir("uv-bootstrap");
+        // A fake uv: `venv <dir>` materializes the interpreter, `pip install` succeeds.
+        // The deliberately-missing bootstrap python proves the uv branch was taken.
+        let uv = root.join("uv");
+        fs::write(
+            &uv,
+            "#!/bin/sh\nif [ \"$1\" = venv ]; then\n  for last; do :; done\n  mkdir -p \"$last/bin\"\n  touch \"$last/bin/python\"\nfi\nexit 0\n",
+        )
+        .unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let python =
+            ensure_managed_python(&root, Some(&uv), "interval-missing-bootstrap-python").unwrap();
+
+        assert_eq!(python, venv_python(&root.join(DEFAULT_VENV_DIR)));
+        assert!(python.exists());
+        assert!(root.join(DEFAULT_VENV_DIR).join(READY_SENTINEL).exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_reports_stderr_through_the_log_file() {
+        let root = scratch_dir("stderr-capture");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("echo boom >&2; exit 3");
+
+        let output = run_command(
+            command,
+            Duration::from_secs(10),
+            &root.join(STDERR_LOG),
+        )
+        .unwrap();
+
+        assert!(!output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "boom");
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn bahrain_session_maps_to_fastf1_round() {
