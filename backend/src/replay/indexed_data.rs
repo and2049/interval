@@ -109,6 +109,7 @@ impl<'a> ReplayDataIndex<'a> {
     }
 
     pub(crate) fn timing_rows(&self, t: f64) -> Vec<DriverSnapshot> {
+        let (bests_by_driver, overall_bests) = best_times(&self.data.laps, t);
         let mut rows = self
             .data
             .drivers
@@ -122,6 +123,8 @@ impl<'a> ReplayDataIndex<'a> {
                 let stint = stint_for(&self.data.stints, driver.driver_number, lap_number);
                 let in_pit = self.in_pit_window(driver.driver_number, t);
                 let latest_location = self.latest_location_sample(driver.driver_number, t);
+                let driver_bests = bests_by_driver.get(&driver.driver_number);
+                let last_lap = lap_record.and_then(|lap| lap.lap.lap_duration);
 
                 DriverSnapshot {
                     driver: driver.clone(),
@@ -133,12 +136,23 @@ impl<'a> ReplayDataIndex<'a> {
                     gap_to_leader: interval.and_then(|row| row.gap_to_leader.clone()),
                     interval: interval.and_then(|row| row.interval.clone()),
                     lap: lap_number,
-                    last_lap: lap_record.and_then(|lap| lap.lap.lap_duration),
+                    last_lap,
+                    last_lap_status: pace_status(
+                        last_lap,
+                        driver_bests.and_then(|bests| bests.lap),
+                        overall_bests.lap,
+                    ),
+                    best_lap: driver_bests.and_then(|bests| bests.lap),
+                    best_lap_status: pace_status(
+                        driver_bests.and_then(|bests| bests.lap),
+                        driver_bests.and_then(|bests| bests.lap),
+                        overall_bests.lap,
+                    ),
                     compound: stint.map_or(TyreCompound::Unknown, |stint| stint.compound.clone()),
                     stint_age: stint.map(|stint| {
                         lap_number - stint.lap_start + stint.tyre_age_at_start.unwrap_or(0)
                     }),
-                    sectors: sectors_for(lap_record),
+                    sectors: sectors_for(lap_record, driver_bests, &overall_bests),
                     in_pit,
                     status: driver_status(in_pit, result, latest_location, t),
                 }
@@ -414,7 +428,69 @@ fn stint_for(stints: &[Stint], driver_number: i32, lap_number: i32) -> Option<&S
     })
 }
 
-fn sectors_for(lap: Option<&LapRecord>) -> Vec<Sector> {
+/// Best sector and lap times seen so far — one per driver, plus the session's overall.
+#[derive(Default, Clone, Copy)]
+struct BestTimes {
+    sectors: [Option<f64>; 3],
+    lap: Option<f64>,
+}
+
+fn keep_min(current: &mut Option<f64>, candidate: Option<f64>) {
+    if let Some(candidate) = candidate {
+        if current.is_none_or(|best| candidate < best) {
+            *current = Some(candidate);
+        }
+    }
+}
+
+/// Folds every lap visible at `t` (same `t_start <= t` visibility rule the displayed
+/// rows use) into per-driver and overall bests.
+fn best_times(laps: &[LapRecord], t: f64) -> (HashMap<i32, BestTimes>, BestTimes) {
+    let mut per_driver = HashMap::<i32, BestTimes>::new();
+    let mut overall = BestTimes::default();
+    for record in laps.iter().filter(|lap| lap.t_start <= t) {
+        let entry = per_driver.entry(record.lap.driver_number).or_default();
+        let sectors = [
+            record.lap.sector_1,
+            record.lap.sector_2,
+            record.lap.sector_3,
+        ];
+        for (index, sector) in sectors.into_iter().enumerate() {
+            keep_min(&mut entry.sectors[index], sector);
+            keep_min(&mut overall.sectors[index], sector);
+        }
+        keep_min(&mut entry.lap, record.lap.lap_duration);
+        keep_min(&mut overall.lap, record.lap.lap_duration);
+    }
+    (per_driver, overall)
+}
+
+/// F1 pace classification: purple while it stands as the overall best, green while it
+/// is the driver's own best, plain otherwise. `duration` itself is part of the folds,
+/// so equality (within float noise) is what "stands as the best" means.
+fn pace_status(
+    duration: Option<f64>,
+    personal_best: Option<f64>,
+    overall_best: Option<f64>,
+) -> SectorStatus {
+    const EPSILON: f64 = 1e-6;
+    let Some(duration) = duration else {
+        return SectorStatus::Unknown;
+    };
+    if overall_best.is_some_and(|best| duration <= best + EPSILON) {
+        SectorStatus::OverallBest
+    } else if personal_best.is_some_and(|best| duration <= best + EPSILON) {
+        SectorStatus::PersonalBest
+    } else {
+        SectorStatus::Normal
+    }
+}
+
+fn sectors_for(
+    lap: Option<&LapRecord>,
+    driver_bests: Option<&BestTimes>,
+    overall: &BestTimes,
+) -> Vec<Sector> {
     let lap = lap.map(|lap| &lap.lap);
     [
         (1, lap.and_then(|lap| lap.sector_1)),
@@ -425,11 +501,11 @@ fn sectors_for(lap: Option<&LapRecord>) -> Vec<Sector> {
     .map(|(index, duration)| Sector {
         index,
         duration,
-        status: if duration.is_some() {
-            SectorStatus::Normal
-        } else {
-            SectorStatus::Unknown
-        },
+        status: pace_status(
+            duration,
+            driver_bests.and_then(|bests| bests.sectors[index as usize - 1]),
+            overall.sectors[index as usize - 1],
+        ),
     })
     .collect()
 }
@@ -542,6 +618,54 @@ mod tests {
         assert_eq!(
             history.last().map(|event| event.message.as_str()),
             Some("message 19")
+        );
+    }
+
+    #[test]
+    fn pace_statuses_classify_overall_and_personal_bests_at_time_t() {
+        let lap = |driver: i32, number: i32, t_start: f64, s1: f64, duration: f64| LapRecord {
+            t_start,
+            lap: crate::domain::Lap {
+                driver_number: driver,
+                lap_number: number,
+                lap_duration: Some(duration),
+                sector_1: Some(s1),
+                sector_2: None,
+                sector_3: None,
+                is_pit_out_lap: false,
+            },
+        };
+        // Driver 1 improves then slows; driver 2 holds the overall best throughout.
+        let laps = vec![
+            lap(1, 1, 0.0, 26.0, 92.0),
+            lap(2, 1, 0.0, 25.0, 90.0),
+            lap(1, 2, 100.0, 25.5, 91.0),
+            lap(1, 3, 200.0, 27.0, 93.0),
+        ];
+
+        let (by_driver, overall) = best_times(&laps, 150.0);
+        assert_eq!(overall.lap, Some(90.0));
+        // At t=150 driver 1's lap 2 (91.0) is their personal best but not overall.
+        let d1 = by_driver.get(&1).unwrap();
+        assert_eq!(
+            pace_status(Some(91.0), d1.lap, overall.lap),
+            SectorStatus::PersonalBest
+        );
+        assert_eq!(
+            pace_status(Some(90.0), by_driver.get(&2).unwrap().lap, overall.lap),
+            SectorStatus::OverallBest
+        );
+
+        // At t=250 driver 1's latest lap (93.0) beats nothing.
+        let (by_driver, overall) = best_times(&laps, 250.0);
+        assert_eq!(
+            pace_status(Some(93.0), by_driver.get(&1).unwrap().lap, overall.lap),
+            SectorStatus::Normal
+        );
+        // Missing time stays unknown.
+        assert_eq!(
+            pace_status(None, by_driver.get(&1).unwrap().lap, overall.lap),
+            SectorStatus::Unknown
         );
     }
 

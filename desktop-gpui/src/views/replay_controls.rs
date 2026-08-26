@@ -1,6 +1,6 @@
 //! The transport bar: session title, race clock, LIVE/SIM toggles, restart/±15s/
-//! play-pause, channel-health badges, the seek bar and speed select — the port of
-//! `frontend/src/components/ReplayControls.tsx`.
+//! play-pause, the seek bar and speed select — the port of
+//! `frontend/src/components/ReplayControls.tsx` (minus its channel-health badge strip).
 
 use gpui::{Context, MouseButton, SharedString, Window, canvas, div, prelude::*, px, rems, svg};
 use interval_desktop_core::store::{LiveConnection, SimConnection};
@@ -16,10 +16,8 @@ struct ControlsSnapshot {
     playing: bool,
     speed: f64,
     live_active: bool,
-    live_checking: bool,
     sim_active: bool,
     status_label: String,
-    badges: Vec<replay_quality::ChannelBadge>,
 }
 
 fn snapshot(app: &IntervalApp) -> Option<ControlsSnapshot> {
@@ -49,11 +47,6 @@ fn snapshot(app: &IntervalApp) -> Option<ControlsSnapshot> {
     } else {
         "REPLAY".to_string()
     };
-    let badges = if store.live_active {
-        replay_quality::live_dashboard_badges(metadata, store.live_channels())
-    } else {
-        replay_quality::channel_badges(metadata)
-    };
     Some(ControlsSnapshot {
         title: playback::replay_session_title(metadata),
         t: store.time,
@@ -61,10 +54,8 @@ fn snapshot(app: &IntervalApp) -> Option<ControlsSnapshot> {
         playing: store.playing,
         speed: store.speed,
         live_active: store.live_active,
-        live_checking: store.live_availability_checking,
         sim_active: store.live_simulation_active,
         status_label,
-        badges,
     })
 }
 
@@ -89,17 +80,17 @@ pub fn replay_controls(
             .id(id)
             .rounded(px(3.0))
             .border_1()
-            .p_2()
+            .p(px(5.0))
             .map(|el| {
                 if disabled {
                     el.border_color(theme::LINE())
                 } else if accent {
-                    el.border_color(theme::MINT())
-                        .bg(theme::blend(theme::MINT(), theme::BAR_BG(), 0.1))
+                    el.border_color(theme::ACCENT())
+                        .bg(theme::blend(theme::ACCENT(), theme::BAR_BG(), 0.1))
                 } else {
                     el.border_color(theme::LINE())
                         .cursor_pointer()
-                        .hover(|style| style.border_color(theme::MINT()))
+                        .hover(|style| style.border_color(theme::ACCENT()))
                 }
             })
             .when(!disabled, |el| {
@@ -109,7 +100,7 @@ pub fn replay_controls(
             .child(svg().path(icon).size(px(icon_px)).text_color(if disabled {
                 ui::faint()
             } else if accent {
-                theme::MINT()
+                theme::ACCENT()
             } else {
                 theme::TEXT()
             }))
@@ -126,127 +117,94 @@ pub fn replay_controls(
             .border_color(theme::LINE())
             .bg(theme::BAR_BG())
             .px_3()
-            .py_2()
+            .py(px(6.0))
             .font_family(app.mono_font.clone())
-            // Left: session title + clock.
+            // Left: session title · clock, one quiet line.
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
                     .min_w_0()
                     .flex_1()
                     .child(
                         div()
                             .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(rems(0.68))
-                                    .text_color(ui::muted())
-                                    .child("SESSION"),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(state.title),
-                            ),
+                            .text_size(rems(0.72))
+                            .text_color(ui::muted())
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(state.title),
                     )
-                    .child(div().h_8().border_l_1().border_color(theme::LINE()))
                     .child(
                         div()
-                            .child(
-                                div()
-                                    .text_size(rems(0.68))
-                                    .text_color(ui::muted())
-                                    .child("CLOCK"),
-                            )
-                            .child(
-                                div()
-                                    .text_xl()
-                                    .text_color(gpui::white())
-                                    .child(formatters::format_race_clock(state.t)),
-                            ),
+                            .h_4()
+                            .flex_shrink_0()
+                            .border_l_1()
+                            .border_color(theme::LINE()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(rems(0.78))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme::TEXT())
+                            .child(formatters::format_race_clock(state.t)),
                     ),
             )
-            // Center: LIVE / SIM / transport.
+            // Center: LIVE / SIM / transport. `flex_none` mirrors the web grid's `auto`
+            // middle column — the buttons never compress into their neighbors.
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
+                    .flex_none()
                     .gap_1()
-                    .child(
-                        div()
-                            .id("live-toggle")
-                            .rounded(px(3.0))
-                            .border_1()
-                            .px_2()
-                            .py_2()
-                            .text_size(rems(0.65))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .map(|el| {
-                                let disabled = state.live_checking || state.sim_active;
-                                if disabled {
-                                    el.border_color(theme::LINE()).text_color(ui::faint())
-                                } else if state.live_active {
-                                    el.border_color(theme::DANGER())
-                                        .bg(theme::blend(
-                                            theme::DANGER(),
-                                            theme::BAR_BG(),
-                                            0.1,
-                                        ))
-                                        .text_color(theme::DANGER())
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _window, _cx| {
-                                            this.store.stop_live();
-                                        }))
-                                } else {
-                                    el.border_color(theme::MINT())
-                                        .bg(theme::blend(theme::MINT(), theme::BAR_BG(), 0.1))
-                                        .text_color(theme::MINT())
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _window, _cx| {
-                                            this.store.check_live();
-                                        }))
-                                }
-                            })
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        svg()
-                                            .path("icons/radio.svg")
-                                            .size(px(13.0))
-                                            .text_color(if state.live_active {
-                                                theme::DANGER()
-                                            } else {
-                                                theme::MINT()
-                                            }),
-                                    )
-                                    .child(if state.live_active {
-                                        "STOP LIVE"
-                                    } else if state.live_checking {
-                                        "CHECKING"
-                                    } else {
-                                        "OPEN LIVE"
-                                    }),
-                            ),
-                    )
+                    // Opening live lives in the session bar; this button only appears
+                    // once a live session owns the dashboard, as the way out.
+                    .when(state.live_active, |el| {
+                        el.child(
+                            div()
+                                .id("live-toggle")
+                                .rounded(px(3.0))
+                                .border_1()
+                                .px_2()
+                                .py(px(4.0))
+                                .text_size(rems(0.65))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .border_color(theme::DANGER())
+                                .bg(theme::blend(theme::DANGER(), theme::BAR_BG(), 0.1))
+                                .text_color(theme::DANGER())
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _window, _cx| {
+                                    this.store.stop_live();
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            svg()
+                                                .path("icons/radio.svg")
+                                                .size(px(13.0))
+                                                .text_color(theme::DANGER()),
+                                        )
+                                        .child("STOP LIVE"),
+                                ),
+                        )
+                    })
                     .child(
                         div()
                             .id("live-sim-toggle")
                             .rounded(px(3.0))
                             .border_1()
                             .px_2()
-                            .py_2()
+                            .py(px(4.0))
                             .text_size(rems(0.65))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .map(|el| {
@@ -266,13 +224,12 @@ pub fn replay_controls(
                                         }))
                                 } else {
                                     el.border_color(theme::LINE())
-                                        .bg(theme::PANEL())
                                         .text_color(ui::muted())
                                         .cursor_pointer()
                                         .hover(|style| {
                                             style
-                                                .border_color(theme::MINT())
-                                                .text_color(theme::MINT())
+                                                .border_color(theme::ACCENT())
+                                                .text_color(theme::ACCENT())
                                         })
                                         .on_click(cx.listener(|this, _, _window, _cx| {
                                             this.store.toggle_live_simulation();
@@ -284,7 +241,7 @@ pub fn replay_controls(
                     .child(icon_button(
                         "replay-restart",
                         "icons/rotate-ccw.svg",
-                        16.0,
+                        14.0,
                         false,
                         controls_locked,
                         cx,
@@ -293,7 +250,7 @@ pub fn replay_controls(
                     .child(icon_button(
                         "replay-back",
                         "icons/step-back.svg",
-                        16.0,
+                        14.0,
                         false,
                         controls_locked,
                         cx,
@@ -309,7 +266,7 @@ pub fn replay_controls(
                         } else {
                             "icons/play.svg"
                         },
-                        18.0,
+                        16.0,
                         true,
                         controls_locked,
                         cx,
@@ -318,7 +275,7 @@ pub fn replay_controls(
                     .child(icon_button(
                         "replay-forward",
                         "icons/step-forward.svg",
-                        16.0,
+                        14.0,
                         false,
                         controls_locked,
                         cx,
@@ -338,14 +295,7 @@ pub fn replay_controls(
                     .gap_3()
                     .min_w_0()
                     .flex_1()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .children(state.badges.iter().map(ui::channel_badge)),
-                    )
+                    .children(driver_filter(app, cx))
                     .child(seek_bar(t, max_t, controls_locked, app, cx))
                     .child(ui::select_field(
                         "replay-speed",
@@ -366,6 +316,7 @@ pub fn replay_controls(
                     ))
                     .child(
                         div()
+                            .flex_shrink_0()
                             .border_1()
                             .border_color(theme::LINE())
                             .px(px(6.0))
@@ -376,6 +327,168 @@ pub fn replay_controls(
                             .child(state.status_label.to_uppercase()),
                     ),
             ),
+    )
+}
+
+/// The driver filter: a dropdown of every driver in the current frame. Toggling a row
+/// hides that driver's run-timeline card and greys their timing row; the menu stays
+/// open across toggles. State lives on [`IntervalApp::hidden_drivers`] only — nothing
+/// persists, and it works the same for replays and live sessions.
+fn driver_filter(
+    app: &IntervalApp,
+    cx: &mut Context<IntervalApp>,
+) -> Option<impl IntoElement + use<>> {
+    let mut drivers: Vec<(i32, String, gpui::Hsla)> = {
+        let store = app.store.state();
+        store
+            .active_snapshot()?
+            .timing
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.driver.driver_number,
+                    row.driver.code.clone(),
+                    theme::team_colour(&row.driver.team_colour),
+                )
+            })
+            .collect()
+    };
+    if drivers.is_empty() {
+        return None;
+    }
+    // Alphabetical, so rows don't jump around as positions change mid-session.
+    drivers.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let hidden_count = app.hidden_drivers.len();
+    let open = app.open_select == Some(SelectKind::DriverFilter);
+    let filtering = hidden_count > 0;
+    let label = if filtering {
+        format!("FILTER −{hidden_count} ▾")
+    } else {
+        "FILTER ▾".to_string()
+    };
+
+    Some(
+        div()
+            .id("driver-filter")
+            .relative()
+            .flex_shrink_0()
+            .border_1()
+            .border_color(if filtering {
+                theme::ACCENT()
+            } else {
+                theme::LINE()
+            })
+            .bg(theme::PANEL())
+            .px_2()
+            .py(px(3.0))
+            .text_size(rems(0.72))
+            .text_color(if filtering { theme::TEXT() } else { ui::muted() })
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .hover(|style| style.border_color(theme::ACCENT()))
+            .on_click(cx.listener(|this, _, _window, cx| {
+                this.open_select = if this.open_select == Some(SelectKind::DriverFilter) {
+                    None
+                } else {
+                    Some(SelectKind::DriverFilter)
+                };
+                cx.notify();
+            }))
+            .child(label)
+            .when(open, |el| {
+                el.child(gpui::deferred(
+                    gpui::anchored().snap_to_window_with_margin(px(8.0)).child(
+                        div()
+                            .id("driver-filter-menu")
+                            .occlude()
+                            .mt(px(2.0))
+                            .min_w(px(150.0))
+                            .max_h(px(360.0))
+                            .overflow_y_scroll()
+                            .border_1()
+                            .border_color(theme::LINE())
+                            .bg(theme::PANEL())
+                            .shadow_md()
+                            .text_size(rems(0.72))
+                            .on_mouse_down_out(cx.listener(|this, _, _window, cx| {
+                                this.open_select = None;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .id("driver-filter-all")
+                                    .px_2()
+                                    .py(px(4.0))
+                                    .border_b_1()
+                                    .border_color(theme::LINE())
+                                    .text_color(if filtering {
+                                        theme::TEXT()
+                                    } else {
+                                        ui::faint()
+                                    })
+                                    .when(filtering, |el| {
+                                        el.cursor_pointer()
+                                            .hover(|style| style.bg(theme::PANEL_HI()))
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.hidden_drivers.clear();
+                                                cx.notify();
+                                            }))
+                                    })
+                                    .child("SHOW ALL"),
+                            )
+                            .children(drivers.into_iter().enumerate().map(
+                                |(index, (number, code, colour))| {
+                                    let visible = !app.hidden_drivers.contains(&number);
+                                    div()
+                                        .id(index)
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .px_2()
+                                        .py(px(4.0))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(theme::PANEL_HI()))
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            if !this.hidden_drivers.remove(&number) {
+                                                this.hidden_drivers.insert(number);
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .w(px(8.0))
+                                                .h(px(8.0))
+                                                .bg(if visible {
+                                                    colour
+                                                } else {
+                                                    theme::blend(colour, theme::PANEL(), 0.3)
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .text_color(if visible {
+                                                    theme::TEXT()
+                                                } else {
+                                                    ui::faint()
+                                                })
+                                                .child(code),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .text_color(theme::ACCENT())
+                                                .child(if visible { "✓" } else { " " }),
+                                        )
+                                },
+                            )),
+                    ),
+                ))
+            }),
     )
 }
 
@@ -420,6 +533,7 @@ fn seek_bar(
         .id("replay-seek")
         .relative()
         .w(px(220.0))
+        .flex_shrink_0()
         .h(px(16.0))
         .flex()
         .items_center()
@@ -451,7 +565,7 @@ fn seek_bar(
                         .w(gpui::relative(fraction))
                         .h_full()
                         .rounded(px(2.0))
-                        .bg(if disabled { ui::faint() } else { theme::MINT() }),
+                        .bg(if disabled { ui::faint() } else { theme::ACCENT() }),
                 ),
         )
         .child(
@@ -463,6 +577,6 @@ fn seek_bar(
                 .w(px(10.0))
                 .h(px(10.0))
                 .rounded_full()
-                .bg(if disabled { ui::faint() } else { theme::MINT() }),
+                .bg(if disabled { ui::faint() } else { theme::ACCENT() }),
         )
 }

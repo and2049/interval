@@ -199,6 +199,11 @@ export interface DriverSnapshot {
   interval?: string | null;
   lap: number;
   last_lap?: number | null;
+  /** Pace class of last_lap; defaults to "unknown" on snapshots cached before it existed. */
+  last_lap_status?: SectorStatus;
+  /** Driver's fastest lap so far and whether it stands as the session's overall best. */
+  best_lap?: number | null;
+  best_lap_status?: SectorStatus;
   compound: TyreCompound;
   stint_age?: number | null;
   sectors: Sector[];

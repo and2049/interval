@@ -79,6 +79,9 @@ pub struct IntervalApp {
     pub(crate) titlebar_should_move: bool,
     /// Which dropdown is open, if any — at most one at a time.
     pub(crate) open_select: Option<views::ui::SelectKind>,
+    /// Driver numbers hidden by the transport-bar filter: their run-timeline cards are
+    /// dropped and their timing rows greyed. Session-scoped, never persisted.
+    pub(crate) hidden_drivers: std::collections::HashSet<i32>,
     /// The seek bar's painted rectangle, probed each frame so pointer positions can be
     /// mapped to replay times.
     pub(crate) seek_bounds: std::rc::Rc<std::cell::Cell<Bounds<gpui::Pixels>>>,
@@ -163,6 +166,7 @@ impl IntervalApp {
             mono_font,
             titlebar_should_move: false,
             open_select: None,
+            hidden_drivers: std::collections::HashSet::new(),
             seek_bounds: std::rc::Rc::default(),
             scrubbing: false,
             timing_scroll: gpui::UniformListScrollHandle::new(),
@@ -503,9 +507,10 @@ impl Render for IntervalApp {
                             .child(message),
                     )
                     .into_any_element(),
-                // The dashboard grid: `minmax(31rem,38rem) | minmax(26rem,1fr) |
+                // The dashboard grid: `minmax(34.5rem,38rem) | minmax(26rem,1fr) |
                 // minmax(18rem,21rem)` over `1fr | 13rem`, approximated with flex
-                // grow factors clamped by min/max widths.
+                // grow factors clamped by min/max widths. The timing minimum covers
+                // the tower's 34.1rem of fixed columns plus its borders.
                 None => {
                     let timing = views::timing_tower(self, window, cx).into_any_element();
                     let map = views::track_map(self, window, cx).into_any_element();
@@ -528,7 +533,7 @@ impl Render for IntervalApp {
                                 .child(
                                     div()
                                         .flex_1()
-                                        .min_w(gpui::rems(31.0))
+                                        .min_w(gpui::rems(34.5))
                                         .max_w(gpui::rems(38.0))
                                         .min_h_0()
                                         .child(timing),

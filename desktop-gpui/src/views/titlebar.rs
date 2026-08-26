@@ -106,7 +106,7 @@ pub fn titlebar(
                         .w(px(3.0))
                         .h(px(12.0))
                         .rounded(px(1.0))
-                        .bg(theme::MINT()),
+                        .bg(theme::ACCENT()),
                 )
                 .child(
                     div()

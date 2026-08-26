@@ -85,16 +85,16 @@ pub fn settings_menu(
                 if !enabled {
                     el.border_color(theme::LINE()).text_color(ui::faint())
                 } else if accent {
-                    el.border_color(theme::MINT())
-                        .bg(theme::blend(theme::MINT(), theme::PANEL(), 0.1))
-                        .text_color(theme::MINT())
+                    el.border_color(theme::ACCENT())
+                        .bg(theme::blend(theme::ACCENT(), theme::PANEL(), 0.1))
+                        .text_color(theme::ACCENT())
                         .cursor_pointer()
                 } else {
                     el.border_color(theme::LINE())
                         .text_color(ui::muted())
                         .cursor_pointer()
                         .hover(|style| {
-                            style.border_color(theme::MINT()).text_color(theme::MINT())
+                            style.border_color(theme::ACCENT()).text_color(theme::ACCENT())
                         })
                 }
             })
@@ -131,7 +131,7 @@ pub fn settings_menu(
                     .border_color(theme::LINE())
                     .p_2()
                     .cursor_pointer()
-                    .hover(|style| style.border_color(theme::MINT()))
+                    .hover(|style| style.border_color(theme::ACCENT()))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.settings.open = !this.settings.open;
                         if this.settings.open {
@@ -170,7 +170,7 @@ pub fn settings_menu(
                                     div()
                                         .mb_2()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(theme::MINT())
+                                        .text_color(theme::ACCENT())
                                         .child("OPENF1 API TOKEN"),
                                 )
                                 .child(
@@ -195,7 +195,7 @@ pub fn settings_menu(
                                                 .flex_1()
                                                 .border_1()
                                                 .border_color(if input_focused {
-                                                    theme::MINT()
+                                                    theme::ACCENT()
                                                 } else {
                                                     theme::LINE()
                                                 })
@@ -227,7 +227,7 @@ pub fn settings_menu(
                                                                 div()
                                                                     .w(px(1.0))
                                                                     .h(px(14.0))
-                                                                    .bg(theme::MINT()),
+                                                                    .bg(theme::ACCENT()),
                                                             )
                                                         })
                                                         .into_any_element(),
@@ -245,8 +245,8 @@ pub fn settings_menu(
                                                 .cursor_pointer()
                                                 .hover(|style| {
                                                     style
-                                                        .border_color(theme::MINT())
-                                                        .text_color(theme::MINT())
+                                                        .border_color(theme::ACCENT())
+                                                        .text_color(theme::ACCENT())
                                                 })
                                                 .on_click(cx.listener(|this, _, _window, cx| {
                                                     this.settings.reveal =

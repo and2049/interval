@@ -15,15 +15,20 @@ fn hex(rgb: u32) -> Hsla {
     .into()
 }
 
-// Core tokens (tailwind.config.ts).
+// Core tokens. Originally ported from `frontend/tailwind.config.ts`; the desktop app
+// has since moved to a greyscale scheme — the web frontend's mint/lime accents are
+// retired, and only functional colors (amber warnings, red danger, team/tyre colors)
+// stay chromatic.
 pub const CARBON: fn() -> Hsla = || hex(0x111418); // window background
 pub const PANEL: fn() -> Hsla = || hex(0x191d23);
 pub const PANEL_HI: fn() -> Hsla = || hex(0x232a32);
 pub const LINE: fn() -> Hsla = || hex(0x3a424d);
-pub const MINT: fn() -> Hsla = || hex(0x2cf5bf);
+/// The interactive accent: steel grey (was the web frontend's mint).
+pub const ACCENT: fn() -> Hsla = || hex(0xaeb7c2);
 pub const AMBER: fn() -> Hsla = || hex(0xf3d24f);
 pub const DANGER: fn() -> Hsla = || hex(0xff4b4b);
-pub const TIMING: fn() -> Hsla = || hex(0xd7e34d);
+/// Timing values (gaps, lap times): near-white (was the web frontend's lime).
+pub const TIMING: fn() -> Hsla = || hex(0xdde3ea);
 
 // Literal hexes carried over from component markup.
 pub const BAR_BG: fn() -> Hsla = || hex(0x15191f); // selector/controls bars

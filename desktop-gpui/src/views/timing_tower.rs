@@ -4,13 +4,15 @@
 use gpui::{Context, Hsla, Window, div, prelude::*, rems, uniform_list};
 use interval_backend::domain::DriverSnapshot;
 use interval_desktop_core::formatters::{self, Tone};
-use interval_desktop_core::{replay_quality, timing_display};
+use interval_desktop_core::timing_display;
 
 use super::ui;
 use crate::{IntervalApp, theme};
 
-/// `.table-grid` fixed column widths (styles.css), in rems.
-const COLUMNS: [f32; 9] = [2.2, 3.4, 4.4, 4.4, 4.4, 4.4, 3.2, 3.2, 3.1];
+/// Fixed column widths in rems, adapted from `.table-grid` (styles.css): sectors only
+/// ever show `SS.mmm` (6 chars), while LAP shows `M:SS.mmm` (8 chars ≈ 4.2rem at this
+/// font size) — the web's 3.2rem LAP track clipped it against the tyre column.
+const COLUMNS: [f32; 9] = [2.2, 3.4, 4.4, 4.4, 4.0, 4.0, 4.0, 4.6, 3.1];
 const HEADERS: [&str; 9] = ["P", "DRV", "GAP", "INT", "S1", "S2", "S3", "LAP", "TY"];
 /// `.timing-cell` min-height, doubling as the uniform row height.
 const ROW_HEIGHT: f32 = 1.65;
@@ -23,12 +25,15 @@ const SLATE_100: fn() -> Hsla = || gpui::rgb(0xf1f5f9).into();
 const SLATE_200: fn() -> Hsla = || gpui::rgb(0xe2e8f0).into();
 const SLATE_300: fn() -> Hsla = || gpui::rgb(0xcbd5e1).into();
 
+/// Lime marks a sub-second interval (DRS range); the pace palette lives in `ui`.
+const DRS_LIME: fn() -> Hsla = || gpui::rgb(0xd7e34d).into();
+
 /// The concrete color for a [`Tone`] — the CSS class strings the TS formatters
 /// returned, resolved against the theme.
 fn tone_color(tone: Tone) -> Hsla {
     match tone {
         Tone::Fuchsia => FUCHSIA(),
-        Tone::Mint => theme::MINT(),
+        Tone::Mint => theme::ACCENT(),
         Tone::Timing => theme::TIMING(),
         Tone::Danger => theme::DANGER(),
         Tone::Amber => theme::AMBER(),
@@ -56,8 +61,11 @@ fn cell(width: f32) -> gpui::Div {
         .overflow_hidden()
 }
 
-fn timing_row(ix: usize, row: &DriverSnapshot) -> impl IntoElement + use<> {
-    let compound_tone = tone_color(formatters::compound_class(&row.compound));
+/// `dimmed` — the driver is hidden by the transport-bar filter: every color collapses
+/// to the faint grey so the row recedes without losing its slot.
+fn timing_row(ix: usize, row: &DriverSnapshot, dimmed: bool) -> impl IntoElement + use<> {
+    let paint = move |color: Hsla| if dimmed { ui::faint() } else { color };
+    let compound_tone = paint(tone_color(formatters::compound_class(&row.compound)));
     div()
         .id(ix)
         .flex()
@@ -65,31 +73,45 @@ fn timing_row(ix: usize, row: &DriverSnapshot) -> impl IntoElement + use<> {
         .hover(|style| style.bg(theme::blend(theme::PANEL_HI(), theme::PANEL(), 0.8)))
         .child(
             cell(COLUMNS[0])
-                .text_color(theme::MINT())
+                .text_color(paint(theme::ACCENT()))
                 .child(row.position.to_string()),
         )
         .child(
             cell(COLUMNS[1])
                 .gap_1()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(gpui::white())
+                .text_color(paint(gpui::white()))
                 .child(
                     div()
                         .h(rems(1.0))
                         .w(rems(0.25))
                         .flex_shrink_0()
-                        .bg(theme::team_colour(&row.driver.team_colour)),
+                        .bg(if dimmed {
+                            theme::blend(
+                                theme::team_colour(&row.driver.team_colour),
+                                theme::PANEL(),
+                                0.3,
+                            )
+                        } else {
+                            theme::team_colour(&row.driver.team_colour)
+                        }),
                 )
                 .child(row.driver.code.clone()),
         )
         .child(
-            cell(COLUMNS[2]).text_color(theme::TIMING()).child(
+            cell(COLUMNS[2]).text_color(paint(theme::TIMING())).child(
                 timing_display::gap_label(row.position, row.gap_to_leader.as_deref()).to_string(),
             ),
         )
         .child(
             cell(COLUMNS[3])
-                .text_color(SLATE_200())
+                .text_color(paint(
+                    if timing_display::interval_within_one_second(row.interval.as_deref()) {
+                        DRS_LIME()
+                    } else {
+                        SLATE_200()
+                    },
+                ))
                 .child(timing_display::interval_label(row.interval.as_deref()).to_string()),
         )
         .children(
@@ -97,22 +119,24 @@ fn timing_row(ix: usize, row: &DriverSnapshot) -> impl IntoElement + use<> {
                 .into_iter()
                 .enumerate()
                 .map(|(index, sector)| {
-                    let (label, color) = match sector {
-                        Some(sector) => (
-                            sector
-                                .duration
-                                .map(|duration| format!("{duration:.3}"))
-                                .unwrap_or_else(|| "--".to_string()),
-                            tone_color(formatters::sector_class(&sector.status)),
-                        ),
+                    let (label, color) = match sector.and_then(|s| s.duration.map(|d| (s, d))) {
+                        Some((sector, duration)) => {
+                            (format!("{duration:.3}"), ui::pace_color(&sector.status))
+                        }
                         None => ("--".to_string(), ui::muted()),
                     };
-                    cell(COLUMNS[4 + index]).text_color(color).child(label)
+                    cell(COLUMNS[4 + index])
+                        .text_color(paint(color))
+                        .child(label)
                 }),
         )
         .child(
             cell(COLUMNS[7])
-                .text_color(gpui::white())
+                .text_color(paint(if row.last_lap.is_some() {
+                    ui::pace_color(&row.last_lap_status)
+                } else {
+                    ui::muted()
+                }))
                 .child(formatters::format_lap_time(row.last_lap)),
         )
         .child(
@@ -134,15 +158,12 @@ pub fn timing_tower(
     _window: &mut Window,
     cx: &mut Context<IntervalApp>,
 ) -> impl IntoElement {
-    let (quality, row_count) = {
+    let row_count = {
         let store = app.store.state();
-        match store.active_snapshot() {
-            Some(snapshot) => (
-                Some(snapshot.timing.quality.clone()),
-                snapshot.timing.rows.len(),
-            ),
-            None => (None, 0),
-        }
+        store
+            .active_snapshot()
+            .map(|snapshot| snapshot.timing.rows.len())
+            .unwrap_or(0)
     };
 
     div()
@@ -154,30 +175,23 @@ pub fn timing_tower(
         .border_1()
         .border_color(theme::LINE())
         .bg(theme::PANEL())
-        // Panel header: title + quality badge.
+        // Slim panel header, matching `side_panels::panel`.
         .child(
             div()
-                .h_8()
+                .h(rems(1.3))
                 .flex_shrink_0()
                 .flex()
-                .flex_row()
                 .items_center()
-                .justify_between()
                 .border_b_1()
                 .border_color(theme::LINE())
                 .bg(theme::PANEL_HI())
                 .px_2()
                 .child(
                     div()
-                        .text_size(rems(0.72))
+                        .text_size(rems(0.6))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::MINT())
+                        .text_color(theme::ACCENT())
                         .child("TIMING"),
-                )
-                .children(
-                    quality
-                        .as_ref()
-                        .map(|quality| ui::channel_badge(&replay_quality::quality_badge(quality))),
                 ),
         )
         .child(
@@ -225,7 +239,14 @@ pub fn timing_tower(
                                     .map(|snapshot| snapshot.timing.rows.as_slice())
                                     .unwrap_or(&[]);
                                 range
-                                    .filter_map(|ix| rows.get(ix).map(|row| timing_row(ix, row)))
+                                    .filter_map(|ix| {
+                                        rows.get(ix).map(|row| {
+                                            let dimmed = this
+                                                .hidden_drivers
+                                                .contains(&row.driver.driver_number);
+                                            timing_row(ix, row, dimmed)
+                                        })
+                                    })
                                     .collect::<Vec<_>>()
                             },
                         ),

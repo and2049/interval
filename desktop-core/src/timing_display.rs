@@ -23,6 +23,14 @@ pub fn interval_label(interval: Option<&str>) -> &str {
     interval.unwrap_or("--")
 }
 
+/// True when the interval to the car ahead is under a second — the DRS-range highlight.
+/// Non-numeric intervals ("--", "1 LAP") never qualify.
+pub fn interval_within_one_second(interval: Option<&str>) -> bool {
+    interval
+        .and_then(|raw| raw.trim().trim_start_matches('+').parse::<f64>().ok())
+        .is_some_and(|value| value < 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +105,9 @@ mod tests {
             interval: None,
             lap: 1,
             last_lap: None,
+            last_lap_status: Default::default(),
+            best_lap: None,
+            best_lap_status: Default::default(),
             compound: TyreCompound::Medium,
             stint_age: None,
             sectors: vec![],

@@ -3,10 +3,28 @@
 //! frontend's `<select>`s.
 
 use gpui::{Context, Hsla, SharedString, Window, div, prelude::*, px, rems};
+use interval_backend::domain::SectorStatus;
 use interval_desktop_core::replay_quality::{BadgeTone, ChannelBadge};
 use interval_desktop_core::session_readiness;
 
 use crate::{IntervalApp, theme};
+
+// The F1 broadcast pace colors: purple = overall best, green = personal best,
+// yellow = no improvement.
+pub const PACE_PURPLE: fn() -> Hsla = || gpui::rgb(0xc084fc).into();
+pub const PACE_GREEN: fn() -> Hsla = || gpui::rgb(0x34d399).into();
+pub const PACE_YELLOW: fn() -> Hsla = || gpui::rgb(0xf3d24f).into();
+
+/// Color for a sector/lap time by its pace status. `Unknown` with a real time only
+/// happens on snapshots cached before statuses were computed — render those plain.
+pub fn pace_color(status: &SectorStatus) -> Hsla {
+    match status {
+        SectorStatus::OverallBest => PACE_PURPLE(),
+        SectorStatus::PersonalBest => PACE_GREEN(),
+        SectorStatus::Normal => PACE_YELLOW(),
+        SectorStatus::Unknown => theme::TIMING(),
+    }
+}
 
 /// Muted slate the frontend used for secondary text (`text-slate-400/500`).
 pub fn muted() -> Hsla {
@@ -20,7 +38,7 @@ pub fn faint() -> Hsla {
 /// Border+text color for a channel/status badge tone.
 pub fn badge_tone_color(tone: BadgeTone) -> Hsla {
     match tone {
-        BadgeTone::Ready => theme::MINT(),
+        BadgeTone::Ready => theme::ACCENT(),
         BadgeTone::Degraded => theme::AMBER(),
         BadgeTone::Missing => muted(),
     }
@@ -29,7 +47,7 @@ pub fn badge_tone_color(tone: BadgeTone) -> Hsla {
 pub fn quality_tone_color(tone: interval_desktop_core::replay_quality::Tone) -> Hsla {
     use interval_desktop_core::replay_quality::Tone;
     match tone {
-        Tone::Mint => theme::MINT(),
+        Tone::Mint => theme::ACCENT(),
         Tone::Amber => theme::AMBER(),
         Tone::Neutral => muted(),
     }
@@ -37,7 +55,7 @@ pub fn quality_tone_color(tone: interval_desktop_core::replay_quality::Tone) -> 
 
 pub fn readiness_tone_color(tone: session_readiness::Tone) -> Hsla {
     match tone {
-        session_readiness::Tone::Mint => theme::MINT(),
+        session_readiness::Tone::Mint => theme::ACCENT(),
         session_readiness::Tone::Amber => theme::AMBER(),
         session_readiness::Tone::Danger => theme::DANGER(),
         session_readiness::Tone::Neutral => muted(),
@@ -78,6 +96,7 @@ pub enum SelectKind {
     Meeting,
     Session,
     Speed,
+    DriverFilter,
 }
 
 /// A labelled dropdown: a bordered button showing the current value, and when open an
@@ -101,6 +120,7 @@ pub fn select_field<V: Copy + PartialEq + 'static>(
         .flex()
         .flex_row()
         .items_center()
+        .flex_shrink_0()
         .gap_1()
         .child(
             div()
@@ -121,7 +141,7 @@ pub fn select_field<V: Copy + PartialEq + 'static>(
                 .text_color(if disabled { faint() } else { theme::TEXT() })
                 .when(!disabled, |el| {
                     el.cursor_pointer()
-                        .hover(|style| style.border_color(theme::MINT()))
+                        .hover(|style| style.border_color(theme::ACCENT()))
                         .on_click(cx.listener(move |this, _, _window, cx| {
                             this.open_select = if this.open_select == Some(kind) {
                                 None

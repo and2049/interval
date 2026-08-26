@@ -4,7 +4,7 @@
 //! lives in `interval_desktop_core::selector`).
 
 use gpui::{Context, SharedString, Window, div, prelude::*, px, rems};
-use interval_desktop_core::replay_quality::{self, BadgeTone};
+use interval_desktop_core::replay_quality::BadgeTone;
 use interval_desktop_core::session_readiness::{self, SessionActionState};
 
 use super::ui::{self, SelectKind, SelectOption};
@@ -17,10 +17,9 @@ pub fn session_selector(
 ) -> impl IntoElement {
     let settings_cell =
         super::settings_menu(app, window, cx).map(|element| element.into_any_element());
-    let (live_availability, live_checking, live_active, live_status_message) = {
+    let (live_checking, live_active, live_status_message) = {
         let store = app.store.state();
         (
-            store.live_availability.clone(),
             store.live_availability_checking,
             store.live_active,
             store.live_availability_message.clone(),
@@ -96,12 +95,6 @@ pub fn session_selector(
     let latest_outcome = session_readiness::ingest_outcome(selector.last_ingest.as_ref());
     let discovery_failed = selector.discovery_failed();
     let no_race_session = selector.no_race_session_for_meeting();
-
-    let live_badge = replay_quality::live_availability_badge(
-        &live_availability,
-        live_checking,
-        live_active,
-    );
 
     let value_label = |options: &[SelectOption<i64>], selected: Option<i64>| -> SharedString {
         selected
@@ -185,9 +178,9 @@ pub fn session_selector(
                     if action_disabled {
                         el.border_color(theme::LINE()).text_color(ui::faint())
                     } else {
-                        el.border_color(theme::MINT())
-                            .bg(theme::blend(theme::MINT(), theme::BAR_BG_DEEP(), 0.1))
-                            .text_color(theme::MINT())
+                        el.border_color(theme::ACCENT())
+                            .bg(theme::blend(theme::ACCENT(), theme::BAR_BG_DEEP(), 0.1))
+                            .text_color(theme::ACCENT())
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _window, _cx| {
                                 this.selector.open_selected();
@@ -214,8 +207,8 @@ pub fn session_selector(
                             .cursor_pointer()
                             .hover(|style| {
                                 style
-                                    .border_color(theme::MINT())
-                                    .text_color(theme::MINT())
+                                    .border_color(theme::ACCENT())
+                                    .text_color(theme::ACCENT())
                             })
                             .on_click(cx.listener(|this, _, _window, _cx| {
                                 this.store.check_live();
@@ -230,14 +223,13 @@ pub fn session_selector(
                     "OPEN LIVE"
                 }),
         )
-        .child(ui::channel_badge(&live_badge))
         .children(
             action_status.map(|message| div().text_color(theme::AMBER()).child(message)),
         )
         .when(live_active, |el| {
             el.child(
                 div()
-                    .text_color(theme::MINT())
+                    .text_color(theme::ACCENT())
                     .child("Live race owns the dashboard."),
             )
         })
