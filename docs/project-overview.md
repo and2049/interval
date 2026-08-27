@@ -21,7 +21,7 @@ The end goal is to build a polished, resume-worthy and genuinely useful F1 dashb
 - Compare drivers, stints, pace, and incidents in a single interface.
 - Switch between historical replay, live simulation, and live race mode without changing dashboard panels.
 
-Long term, the project should be credible as both a fan product and a strong software engineering portfolio piece. It should demonstrate real-time systems thinking, strong domain modeling, efficient frontend rendering, clear UX for data-dense applications, and an architecture that supports both historical replay and live ingestion.[cite:6][cite:20]
+Long term, the project should be credible as both a fan product and a strong software engineering portfolio piece. It should demonstrate real-time systems thinking, strong domain modeling, efficient client rendering, clear UX for data-dense applications, and an architecture that supports both historical replay and live ingestion.[cite:6][cite:20]
 
 ## Product Vision
 
@@ -83,26 +83,27 @@ The interface should be optimized for **quick scanning**. Users should be able t
 ### Selected stack
 
 - **Backend:** Rust.
-- **Frontend:** SolidJS.
-- **Styling/UI:** Tailwind CSS.
-- **Primary app type:** Web app, with an Electron shell for desktop delivery.
+- **Client:** Rust — a native [GPUI](https://github.com/zed-industries/zed) desktop app (`desktop-gpui`) over a shared client library (`desktop-core`).
+- **Styling/UI:** GPUI's built-in styling with shared theme tokens.
+- **Primary app type:** Native desktop app that embeds the backend in-process.
 - **Data mode:** Live/replay contract-first.
 
-This stack is intended to balance performance, type safety, and a lightweight client. SolidJS is a good fit for a dashboard with many small, frequently updating UI regions, while Rust supports strong domain modeling, efficient replay processing, and live-ingestion services.
+This stack keeps the whole app in Rust: strong domain modeling, efficient replay processing, and live-ingestion services in the backend, and a GPUI client that renders a dashboard of many small, frequently updating regions natively. The client stays a thin renderer over `desktop-core`, which owns state, playback, and formatting so it can be unit-tested without a window.
 
 ### Architectural principles
 
-- Keep the frontend thin; most replay logic and data shaping should live in the backend.
+- Keep the client thin; most replay logic and data shaping should live in the backend.
 - Separate raw data ingestion from normalized internal domain models.
 - Treat replay mode, live simulation, and OpenF1 live mode as inputs into the same application model.
 - Optimize for incremental rendering and fast screen updates.
-- Prefer simple deployable web architecture; the desktop shell reuses that architecture rather than forking it, by serving the same built frontend from the same backend.
+- Keep the client behind the backend's HTTP + SSE contract; the desktop app embeds the backend in-process and consumes that same contract, so a future web client could reuse it without forking the architecture.
 
 ## Proposed System Structure
 
 ### High-level components
 
-- `frontend/` — SolidJS web app and UI components.
+- `desktop-gpui/` — native GPUI desktop app (views + app shell, embeds the backend).
+- `desktop-core/` — shared client library: API client, store/runtime, playback, and view-model helpers.
 - `backend/` — Rust services for ingestion, replay, APIs, and analytics.
 - `shared/` — API contracts, event names, and schema definitions.
 - `docs/` — planning docs, architecture notes, wireframes, and contributor guidance.
@@ -116,16 +117,23 @@ This stack is intended to balance performance, type safety, and a lightweight cl
 - `domain/` — core entities such as session, driver, lap, sector, stint, race-control message, and weather sample.
 - `replay/` — timeline engine, seek logic, speed control, and event synchronization.
 - `analytics/` — derived metrics and strategy calculations.
-- `api/` — backend API surface for the frontend.
+- `api/` — backend API surface for the client.
 - `storage/` — local caching and persistence.
 
-### Frontend modules
+### Client modules
 
-- `routes/` — session selection, dashboard, compare views.
-- `components/` — timing tower, track map, strategy board, event feed, charts.
-- `stores/` — app state and subscriptions.
-- `lib/formatters/` — lap time, gaps, tire labels, colors.
-- `themes/` — dashboard theme tokens and density modes.
+In `desktop-core` (headless, unit-tested):
+
+- `api_client` / `sse` — HTTP + SSE access to the backend.
+- `store/` — app state, subscriptions, and the replay runtime.
+- `playback` / `selector` — cursor, seek, speed, and session selection.
+- `formatters` and `*_display` — lap time, gaps, tyre labels, colors, and per-panel view models.
+
+In `desktop-gpui` (GPUI views):
+
+- `views/` — timing tower, track map, stint timeline, side panels, session selector, controls.
+- `theme` — dashboard theme tokens.
+- `embed` — in-process backend supervision and per-user data directory.
 
 ## Core Domain Model
 

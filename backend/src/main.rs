@@ -1,6 +1,5 @@
 use interval_backend::server::{self, ServeOptions};
 use std::net::SocketAddr;
-use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,7 +23,6 @@ async fn main() -> anyhow::Result<()> {
         ServeOptions {
             bind,
             database_url,
-            static_dir: std::env::var_os("INTERVAL_STATIC_DIR").map(PathBuf::from),
             enable_settings_api: std::env::var_os("INTERVAL_ENABLE_SETTINGS_API").is_some(),
         },
         shutdown_signal(),

@@ -12,7 +12,7 @@ The architecture currently supports three data modes:
 
 ## Primary goals
 
-1. Build a polished, lightweight, data-dense web application.
+1. Build a polished, lightweight, data-dense desktop application.
 2. Keep replay mode deterministic and fully working.
 3. Make live mode use the same normalized dashboard model instead of a separate UI path.
 4. Produce a portfolio-quality codebase with strong engineering structure.
@@ -21,9 +21,9 @@ The architecture currently supports three data modes:
 ## Chosen stack
 
 - **Backend:** Rust.
-- **Frontend:** SolidJS.
-- **Styling:** Tailwind CSS.
-- **App shape:** Web app first; a thin Electron shell in `desktop/` wraps the same backend and built frontend for desktop use.
+- **Client:** Rust — a native [GPUI](https://github.com/zed-industries/zed) desktop app (`desktop-gpui`) over a shared client library (`desktop-core`).
+- **Styling:** GPUI's built-in styling (Tailwind-like flex/utility API), with shared theme tokens in `desktop-gpui/src/theme.rs`.
+- **App shape:** Native desktop app that embeds the backend in-process and consumes it over the same HTTP + SSE contract a web client would.
 - **Delivery model:** Live/replay contract-first.
 
 ## Product principles
@@ -51,8 +51,8 @@ Preferred top-level structure:
 
 ```text
 backend/
-frontend/
-desktop/
+desktop-core/
+desktop-gpui/
 shared/
 docs/
 infra/
@@ -73,16 +73,22 @@ backend/
     storage/
 ```
 
-Preferred frontend structure:
+Preferred client structure. `desktop-core` holds all non-UI client logic (API client, store/runtime, playback, formatters, view-model helpers) so it stays headless and unit-testable; `desktop-gpui` holds only the GPUI views and app shell:
 
 ```text
-frontend/
+desktop-core/
   src/
-    routes/
-    components/
-    stores/
-    lib/
-    themes/
+    api_client.rs        HTTP + SSE client for the backend
+    store/               replay store and runtime
+    playback.rs          seek/speed/cursor logic
+    *_display.rs         panel view-model helpers
+    track_map_view.rs    map projection/interpolation
+desktop-gpui/
+  src/
+    main.rs              app shell + tokio runtime
+    embed.rs             in-process backend
+    theme.rs             shared theme tokens
+    views/               GPUI panels (timing tower, track map, ...)
 ```
 
 ## Domain vocabulary
@@ -121,14 +127,14 @@ same backend-owned snapshot/event model, not a separate UI model.
 - Replay state must be deterministic.
 - Timeline seek and playback speed changes must be first-class features for historical mode.
 - Dashboard panels should derive their displayed state from the current `ReplaySnapshot`.
-- Avoid live-only frontend panel logic; put source-specific behavior behind backend connectors.
+- Avoid live-only client panel logic; put source-specific behavior behind backend connectors.
 
 ## Live-mode rules
 
 - Replay, live simulation, and OpenF1 live should feed the same normalized event model.
 - Live updates should be incremental and stream backend-owned snapshots/events.
 - Credentials must remain server-side.
-- The frontend should subscribe to internal backend streams, not directly to paid upstream services.
+- The client should subscribe to internal backend streams, not directly to paid upstream services.
 - Add live improvements without forcing a redesign of existing dashboard panels.
 
 ## Backend guidance
@@ -149,19 +155,19 @@ The backend should own:
 - Local caching or persistence.
 - Replay timeline generation.
 - Derived metrics and strategy calculations.
-- API endpoints and event streams for the frontend.
+- API endpoints and event streams for the client.
 
 The backend should not become a dumping ground for unscoped experiments. New features should map to a clear domain concept or product need.
 
-## Frontend guidance
+## Client guidance
 
-### SolidJS design expectations
+### GPUI design expectations
 
-- Keep components focused and composable.
-- Use reactive state carefully; avoid hidden coupling between unrelated panels.
-- Prefer clear data-flow from stores to presentation components.
+- Keep views focused and composable; keep non-UI logic in `desktop-core` so it stays headless and unit-testable.
+- Drive views from the shared store/runtime; avoid hidden coupling between unrelated panels.
+- Prefer clear data-flow from the store to presentation views.
 - Optimize for dense information layouts that remain readable.
-- Tailwind usage should support consistency, not utility-class chaos.
+- Styling should support consistency through shared theme tokens, not one-off inline values.
 
 ### UI principles
 
@@ -173,8 +179,8 @@ The backend should not become a dumping ground for unscoped experiments. New fea
 
 ## Styling rules
 
-- Tailwind is the primary styling layer.
-- Create shared tokens for colors, spacing, type scale, and panel density.
+- GPUI's styling API is the primary styling layer.
+- Create shared tokens for colors, spacing, type scale, and panel density in `theme.rs`.
 - Prefer reusable presentation primitives for tables, labels, panels, and timelines.
 - Dark mode should be treated as a first-class experience.
 - Design should feel lightweight and serious, not flashy or game-like.
@@ -212,12 +218,12 @@ Changes that add code without improving one of those categories should be questi
 - Test edge cases for pit events, lap transitions, and missing data.
 - Add regression tests for any parsing bug caused by upstream data quirks.
 
-### Frontend
+### Client
 
 - Test critical display formatting for lap time, interval, and status presentation.
 - Test synchronization between the replay cursor and visible panels.
 - Test loading and empty states.
-- Avoid brittle tests tied to incidental markup details.
+- Keep this logic in `desktop-core` so it can be unit-tested without a window; avoid brittle tests tied to incidental view details.
 
 ## Documentation expectations
 
@@ -252,5 +258,5 @@ These items still need explicit product decisions:
 - How much charting is desirable in the first release versus table-first views?
 - What persistence layer should be used in local development and in production?
 - What deployment target should be assumed for the first public demo?
-- Should there eventually be an advanced TUI companion, or should the web app remain the sole official client?
+- Should there eventually be an advanced TUI companion or a hosted web client, or should the native desktop app remain the sole official client?
 - What is the right production deployment model for OpenF1 live credentials and long-running SSE sessions?

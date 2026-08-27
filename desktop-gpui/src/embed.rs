@@ -186,7 +186,6 @@ pub async fn serve_embedded(
         ServeOptions {
             bind: "127.0.0.1:0".parse().expect("loopback addr parses"),
             database_url: "sqlite://interval.db".to_string(),
-            static_dir: None,
             enable_settings_api: true,
         },
         shutdown,

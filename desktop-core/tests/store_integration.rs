@@ -28,7 +28,6 @@ async fn start_test_server(tag: &str) -> ApiClient {
         ServeOptions {
             bind: "127.0.0.1:0".parse().unwrap(),
             database_url,
-            static_dir: None,
             enable_settings_api: false,
         },
         std::future::pending(),
