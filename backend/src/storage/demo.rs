@@ -266,6 +266,17 @@ fn demo_driver_snapshot(driver: Driver, idx: usize, lap: i32, frame: usize) -> D
         },
         lap,
         last_lap: Some(base),
+        last_lap_status: if idx == 0 {
+            SectorStatus::OverallBest
+        } else {
+            SectorStatus::Normal
+        },
+        best_lap: Some(base - 0.6),
+        best_lap_status: if idx == 0 {
+            SectorStatus::OverallBest
+        } else {
+            SectorStatus::PersonalBest
+        },
         compound: match idx % 3 {
             0 => TyreCompound::Medium,
             1 => TyreCompound::Hard,

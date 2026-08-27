@@ -133,12 +133,13 @@ pub struct Sector {
     pub status: SectorStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SectorStatus {
     PersonalBest,
     OverallBest,
     Normal,
+    #[default]
     Unknown,
 }
 

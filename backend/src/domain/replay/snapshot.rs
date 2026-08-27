@@ -1,7 +1,7 @@
 use super::{quality::DataQuality, quality::MapMode, REPLAY_CONTRACT_VERSION};
 use crate::domain::{
-    DerivedMetric, Driver, RaceControlMessage, ReplayCursor, Sector, TrackPositionSample,
-    TyreCompound, WeatherSample,
+    DerivedMetric, Driver, RaceControlMessage, ReplayCursor, Sector, SectorStatus,
+    TrackPositionSample, TyreCompound, WeatherSample,
 };
 use serde::{Deserialize, Serialize};
 
@@ -95,6 +95,17 @@ pub struct DriverSnapshot {
     pub interval: Option<String>,
     pub lap: i32,
     pub last_lap: Option<f64>,
+    /// Pace class of `last_lap` (overall/personal best/no improvement), same scale as
+    /// sector statuses. `default` so snapshots cached before this field existed still
+    /// deserialize — they surface as `Unknown` until the session is re-ingested.
+    #[serde(default)]
+    pub last_lap_status: SectorStatus,
+    /// The driver's fastest lap so far, and whether it stands as the session's overall
+    /// best (`OverallBest`) or just their own (`PersonalBest`). Same cache caveat.
+    #[serde(default)]
+    pub best_lap: Option<f64>,
+    #[serde(default)]
+    pub best_lap_status: SectorStatus,
     pub compound: TyreCompound,
     pub stint_age: Option<i32>,
     pub sectors: Vec<Sector>,

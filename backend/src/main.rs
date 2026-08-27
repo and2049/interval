@@ -1,7 +1,6 @@
-use interval_backend::{api, connectors::openf1_historical::HistoricalClient, startup, storage};
+use interval_backend::server::{self, ServeOptions};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -16,61 +15,23 @@ async fn main() -> anyhow::Result<()> {
 
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://interval.db".to_string());
-    let pool = storage::connect(&database_url).await?;
-    storage::migrate(&pool).await?;
-    storage::seed_demo_session(&pool).await?;
-    storage::seed_mvp_fixture(&pool).await?;
-    startup::rebuild_cached_replay_on_start(&pool).await?;
 
-    let state = api::AppState::new(pool, HistoricalClient::default());
-    let mut app = api::router(state.clone());
-
-    // Optional: serve a built frontend from the same origin as the API. Unset in the
-    // web deployment and in local dev (Vite serves the UI there); set by the desktop
-    // shell so the renderer's root-relative /api calls and SSE streams stay same-origin.
-    // The fallback must be attached before `.layer(...)` so static responses are traced.
-    if let Some(dir) = std::env::var_os("INTERVAL_STATIC_DIR") {
-        let dir = PathBuf::from(dir);
-        if !dir.join("index.html").is_file() {
-            anyhow::bail!(
-                "INTERVAL_STATIC_DIR={} does not contain index.html",
-                dir.display()
-            );
-        }
-        tracing::info!(dir = %dir.display(), "serving static UI");
-        // A router fallback only runs when no route matched, so /healthz and every
-        // /api path still win. Deliberately no index.html catch-all: it would turn a
-        // mistyped /api path into a 200 text/html that the frontend cannot parse.
-        app = app.fallback_service(ServeDir::new(&dir));
-    }
-
-    // `Router::layer` wraps only the routes registered so far, so the settings merge
-    // below deliberately lands outside this permissive CORS layer.
-    let mut app = app.layer(CorsLayer::permissive());
-
-    // The settings routes read and write an API credential and this service has no
-    // authentication, so they exist only for the desktop shell, which sets this flag.
-    // Being outside the CORS layer means a cross-origin request gets no
-    // Access-Control-Allow-Origin and no OPTIONS handler, so the browser's preflight
-    // fails and the request is never delivered.
-    if std::env::var_os("INTERVAL_ENABLE_SETTINGS_API").is_some() {
-        tracing::info!("settings API enabled");
-        app = app.merge(api::settings_router(state));
-    }
-
-    let app = app.layer(TraceLayer::new_for_http());
-
-    let addr: SocketAddr = std::env::var("INTERVAL_BIND")
+    let bind: SocketAddr = std::env::var("INTERVAL_BIND")
         .unwrap_or_else(|_| "127.0.0.1:4000".to_string())
         .parse()?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let bound = listener.local_addr()?;
-    tracing::info!("interval backend listening on http://{bound}");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let bound = server::serve(
+        ServeOptions {
+            bind,
+            database_url,
+            static_dir: std::env::var_os("INTERVAL_STATIC_DIR").map(PathBuf::from),
+            enable_settings_api: std::env::var_os("INTERVAL_ENABLE_SETTINGS_API").is_some(),
+        },
+        shutdown_signal(),
+    )
+    .await?;
 
+    bound.task.await??;
     Ok(())
 }
 

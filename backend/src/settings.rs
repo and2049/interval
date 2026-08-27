@@ -119,9 +119,10 @@ fn non_empty(value: Option<&OsStr>) -> Option<&OsStr> {
     value.filter(|value| !value.is_empty())
 }
 
-/// `<config dir>/interval/settings.json`, or `None` if the platform's config directory
-/// cannot be determined (in which case settings are simply unavailable, not fatal).
-pub fn default_path() -> Option<PathBuf> {
+/// The per-user config directory (`<config>/interval`), or `None` if the platform's
+/// config directory cannot be determined. Shared with the desktop frontend, which keeps
+/// its own state files (window bounds, last session) next to `settings.json`.
+pub fn config_dir() -> Option<PathBuf> {
     let os = if cfg!(windows) {
         "windows"
     } else if cfg!(target_os = "macos") {
@@ -133,7 +134,12 @@ pub fn default_path() -> Option<PathBuf> {
     let xdg = std::env::var_os("XDG_CONFIG_HOME");
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     settings_dir_from(os, appdata.as_deref(), xdg.as_deref(), home.as_deref())
-        .map(|dir| dir.join(FILE_NAME))
+}
+
+/// `<config dir>/interval/settings.json`, or `None` if the platform's config directory
+/// cannot be determined (in which case settings are simply unavailable, not fatal).
+pub fn default_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join(FILE_NAME))
 }
 
 /// Reads settings, treating every failure as "no settings".
