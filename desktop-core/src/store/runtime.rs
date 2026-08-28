@@ -931,3 +931,395 @@ fn gate_current(gate: &AtomicU64, generation: u64) -> bool {
     gate.load(Ordering::SeqCst) == generation
 }
 
+fn reconcile_replay_stream(shared: &Arc<Shared>) {
+    let desired = shared.read(|store| {
+        let meta = store.active_metadata()?;
+        (store.playing && !store.live_simulation_active && !store.live_active).then(|| {
+            ReplayStreamConfig {
+                session_key: meta.session.session_key,
+                from: store.stream_start_time,
+                speed: store.speed,
+            }
+        })
+    });
+    let mut aux = shared.aux.lock().expect("aux lock");
+    if aux.replay_stream.as_ref().map(|task| task.config) == desired {
+        return;
+    }
+    if let Some(task) = aux.replay_stream.take() {
+        task.handle.abort();
+    }
+    let generation = next_generation(&shared.replay_gate);
+    let Some(config) = desired else { return };
+    shared.update(|store| {
+        store.snapshot_loading = true;
+        store.snapshot_error = None;
+    });
+    let shared_task = Arc::clone(shared);
+    let handle = shared.tokio.spawn(async move {
+        run_replay_stream(shared_task, config, generation).await;
+    });
+    aux.replay_stream = Some(StreamTask { config, handle });
+}
+
+async fn run_replay_stream(shared: Arc<Shared>, config: ReplayStreamConfig, generation: u64) {
+    let url = shared
+        .api
+        .stream_url(config.session_key, config.from, config.speed);
+    let current = |store: &ReplayStore| {
+        let _ = store;
+        gate_current(&shared.replay_gate, generation)
+    };
+    match consume_stream(&shared, &url, |shared, event, data| {
+        match event {
+            "snapshot" => match serde_json::from_str::<ReplaySnapshot>(data) {
+                Ok(snapshot) => shared.update(|store| {
+                    if !current(store) {
+                        return;
+                    }
+                    if Some(snapshot.cursor.session_key) == store.session_key {
+                        store.current_snapshot = Some(snapshot);
+                        store.snapshot_loading = false;
+                    }
+                }),
+                Err(error) => shared.update(|store| {
+                    if current(store) {
+                        store.snapshot_error = Some(error.to_string());
+                    }
+                }),
+            },
+            _ => {}
+        }
+    })
+    .await
+    {
+        StreamOutcome::Ended => shared.update(|store| {
+            // The server's `end`: the replay ran to completion.
+            if gate_current(&shared.replay_gate, generation) {
+                store.playing = false;
+            }
+        }),
+        StreamOutcome::TransportError => shared.update(|store| {
+            if gate_current(&shared.replay_gate, generation) {
+                store.snapshot_error = Some("Replay stream disconnected.".to_string());
+            }
+        }),
+    }
+}
+
+fn reconcile_sim_stream(shared: &Arc<Shared>) {
+    let desired = shared.read(|store| {
+        store
+            .session_key
+            .filter(|_| store.live_simulation_active)
+    });
+    let mut aux = shared.aux.lock().expect("aux lock");
+    if aux.sim_stream.as_ref().map(|task| task.config) == desired {
+        return;
+    }
+    if let Some(task) = aux.sim_stream.take() {
+        task.handle.abort();
+    }
+    let generation = next_generation(&shared.sim_gate);
+    let Some(key) = desired else { return };
+    shared.update(|store| {
+        store.live_simulation_connection = SimConnection::Connecting;
+        store.snapshot_loading = true;
+        store.snapshot_error = None;
+    });
+    let shared_task = Arc::clone(shared);
+    let handle = shared.tokio.spawn(async move {
+        run_sim_stream(shared_task, key, generation).await;
+    });
+    aux.sim_stream = Some(StreamTask { config: key, handle });
+}
+
+async fn run_sim_stream(shared: Arc<Shared>, key: i64, generation: u64) {
+    let url = shared.api.live_simulation_stream_url(key);
+    let gate_ok = || gate_current(&shared.sim_gate, generation);
+    match consume_stream(&shared, &url, |shared, event, data| {
+        if !gate_ok() {
+            return;
+        }
+        match event {
+            "metadata" => match serde_json::from_str::<ReplayMetadata>(data) {
+                Ok(metadata) => shared.update(|store| store.live_metadata = Some(metadata)),
+                Err(error) => {
+                    shared.update(|store| store.snapshot_error = Some(error.to_string()))
+                }
+            },
+            "snapshot" => match serde_json::from_str::<ReplaySnapshot>(data) {
+                Ok(snapshot) => shared.update(|store| {
+                    if Some(snapshot.cursor.session_key) == store.session_key {
+                        store.time = snapshot.cursor.t;
+                        store.current_snapshot = Some(snapshot);
+                        store.live_simulation_connection = SimConnection::Connected;
+                        store.snapshot_loading = false;
+                    }
+                }),
+                Err(error) => shared.update(|store| {
+                    store.snapshot_error = Some(error.to_string());
+                    store.live_simulation_connection = SimConnection::Disconnected;
+                }),
+            },
+            _ => {}
+        }
+    })
+    .await
+    {
+        StreamOutcome::Ended => shared.update(|store| {
+            if gate_ok() {
+                store.live_simulation_active = false;
+                store.live_simulation_connection = SimConnection::Idle;
+                store.clear_live_runtime_resources();
+            }
+        }),
+        StreamOutcome::TransportError => shared.update(|store| {
+            if gate_ok() {
+                store.snapshot_error = Some("Live simulation stream disconnected.".to_string());
+                store.live_simulation_connection = SimConnection::Disconnected;
+            }
+        }),
+    }
+}
+
+fn reconcile_live_stream(shared: &Arc<Shared>) {
+    let desired = shared.read(|store| {
+        store
+            .session_key
+            .filter(|_| store.live_active)
+            .map(|key| (key, store.live_reconnect_nonce))
+    });
+    let mut aux = shared.aux.lock().expect("aux lock");
+    if aux.live_stream.as_ref().map(|task| task.config) == desired {
+        return;
+    }
+    if let Some(task) = aux.live_stream.take() {
+        task.handle.abort();
+    }
+    let generation = next_generation(&shared.live_gate);
+    let Some(config) = desired else { return };
+    shared.update(|store| {
+        store.live_connection = LiveConnection::Connecting;
+        store.snapshot_loading = true;
+        store.snapshot_error = None;
+    });
+    let shared_task = Arc::clone(shared);
+    let handle = shared.tokio.spawn(async move {
+        run_live_stream(shared_task, config.0, generation).await;
+    });
+    aux.live_stream = Some(StreamTask { config, handle });
+}
+
+async fn run_live_stream(shared: Arc<Shared>, key: i64, generation: u64) {
+    let url = shared.api.live_stream_url(key);
+    let gate_ok = || gate_current(&shared.live_gate, generation);
+    let outcome = consume_stream(&shared, &url, |shared, event, data| {
+        if !gate_ok() {
+            return;
+        }
+        match event {
+            "metadata" => match serde_json::from_str::<ReplayMetadata>(data) {
+                Ok(metadata) => shared.update(|store| store.live_metadata = Some(metadata)),
+                Err(error) => {
+                    shared.update(|store| store.snapshot_error = Some(error.to_string()))
+                }
+            },
+            "snapshot" => match serde_json::from_str::<ReplaySnapshot>(data) {
+                Ok(snapshot) => {
+                    let session_key = snapshot.cursor.session_key;
+                    let applied = shared.update(|store| {
+                        if Some(session_key) == store.session_key {
+                            store.time = snapshot.cursor.t;
+                            store.current_snapshot = Some(snapshot);
+                            store.live_connection = LiveConnection::Connected;
+                            store.snapshot_loading = false;
+                            store.openf1_live_reconnect_attempts = 0;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    if applied {
+                        let shared = Arc::clone(shared);
+                        shared.tokio.clone().spawn(async move {
+                            refresh_openf1_live_status(&shared, session_key, generation).await;
+                        });
+                    }
+                }
+                Err(error) => shared.update(|store| {
+                    store.snapshot_error = Some(error.to_string());
+                    store.live_connection = LiveConnection::Disconnected;
+                }),
+            },
+            "event" => match serde_json::from_str::<ReplayEvent>(data) {
+                Ok(event) => shared.update(|store| {
+                    if event.t <= store.time {
+                        store.push_live_event(event);
+                    }
+                }),
+                Err(error) => {
+                    shared.update(|store| store.snapshot_error = Some(error.to_string()))
+                }
+            },
+            "error" => {
+                // A server-sent error event: surface it and reconnect with backoff.
+                if let Some(message) = playback::server_sent_error_message(Some(data)) {
+                    shared.update(|store| {
+                        store.snapshot_error = Some(message.clone());
+                        store.snapshot_loading = false;
+                    });
+                    let shared_refresh = Arc::clone(shared);
+                    shared.tokio.clone().spawn(async move {
+                        refresh_openf1_live_status(&shared_refresh, key, generation).await;
+                    });
+                    schedule_openf1_live_reconnect(shared, Some(message));
+                }
+            }
+            _ => {}
+        }
+    })
+    .await;
+
+    if !gate_ok() {
+        return;
+    }
+    let still_live = shared.read(|store| store.live_active);
+    match outcome {
+        StreamOutcome::Ended => {
+            let reconnecting =
+                shared.read(|store| store.live_connection == LiveConnection::Reconnecting);
+            if reconnecting {
+                // The server closed the stream after its error event; the scheduled
+                // reconnect owns the next step.
+                return;
+            }
+            shared.update(|store| {
+                let return_key = playback::session_key_after_live_stops(
+                    store.session_key,
+                    store.return_session_key_after_live,
+                );
+                store.live_active = false;
+                store.live_availability = LiveAvailability::Inactive;
+                store.live_connection = LiveConnection::Idle;
+                store.clear_live_runtime_resources();
+                store.session_key = return_key;
+                store.return_session_key_after_live = None;
+                store.live_availability_message = Some("Live session ended.".to_string());
+            });
+            clear_openf1_live_reconnect(&shared);
+        }
+        StreamOutcome::TransportError => {
+            if still_live {
+                schedule_openf1_live_reconnect(&shared, None);
+            }
+        }
+    }
+}
+
+async fn refresh_openf1_live_status(shared: &Arc<Shared>, key: i64, generation: u64) {
+    {
+        let mut aux = shared.aux.lock().expect("aux lock");
+        if aux
+            .last_status_refresh
+            .is_some_and(|last| last.elapsed() < LIVE_STATUS_REFRESH_MIN_INTERVAL)
+        {
+            return;
+        }
+        aux.last_status_refresh = Some(Instant::now());
+    }
+    let status = shared.api.live_status(key).await.ok();
+    if gate_current(&shared.live_gate, generation) {
+        shared.update(|store| {
+            if playback::should_apply_live_resource_result(
+                status.as_ref().map(|status| status.session_key),
+                store.session_key,
+                store.live_active,
+            ) {
+                store.live_status = status;
+            }
+        });
+    }
+    let geometry = shared.api.live_track_geometry(key).await.ok();
+    if gate_current(&shared.live_gate, generation) {
+        shared.update(|store| {
+            if playback::should_apply_live_resource_result(
+                geometry.as_ref().map(|geometry| geometry.session_key),
+                store.session_key,
+                store.live_active,
+            ) {
+                store.live_geometry = geometry;
+            }
+        });
+    }
+}
+
+fn schedule_openf1_live_reconnect(shared: &Arc<Shared>, reason: Option<String>) {
+    clear_openf1_live_reconnect(shared);
+    let delay_ms = shared.update(|store| {
+        store.openf1_live_reconnect_attempts += 1;
+        let exponent = (store.openf1_live_reconnect_attempts - 1).min(4);
+        let delay_ms = (1000u64 * 2u64.pow(exponent)).min(15_000);
+        store.live_connection = LiveConnection::Reconnecting;
+        let prefix = reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .unwrap_or("OpenF1 live stream disconnected.");
+        store.snapshot_error = Some(format!(
+            "{prefix} Reconnecting in {}s.",
+            (delay_ms as f64 / 1000.0).round() as u64
+        ));
+        delay_ms
+    });
+    let shared_timer = Arc::clone(shared);
+    let handle = shared.tokio.spawn(async move {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        shared_timer.update(|store| {
+            if store.live_active {
+                store.live_reconnect_nonce += 1;
+            }
+        });
+    });
+    shared.aux.lock().expect("aux lock").reconnect_timer = Some(handle);
+}
+
+fn clear_openf1_live_reconnect(shared: &Arc<Shared>) {
+    if let Some(timer) = shared.aux.lock().expect("aux lock").reconnect_timer.take() {
+        timer.abort();
+    }
+}
+
+// ---- Stream transport ----
+
+enum StreamOutcome {
+    /// The response body completed normally: the server sent its (dataless) `end`
+    /// event and closed. Browsers never dispatch that event either — end-of-body is
+    /// the real signal.
+    Ended,
+    TransportError,
+}
+
+async fn consume_stream(
+    shared: &Arc<Shared>,
+    url: &str,
+    mut on_event: impl FnMut(&Arc<Shared>, &str, &str),
+) -> StreamOutcome {
+    let response = match shared.api.open_stream(url).await {
+        Ok(response) => response,
+        Err(_) => return StreamOutcome::TransportError,
+    };
+    let mut parser = SseParser::new();
+    let mut body = response.bytes_stream();
+    while let Some(chunk) = body.next().await {
+        match chunk {
+            Ok(bytes) => {
+                for event in parser.push(&bytes) {
+                    on_event(shared, &event.event, &event.data);
+                }
+            }
+            Err(_) => return StreamOutcome::TransportError,
+        }
+    }
+    StreamOutcome::Ended
+}
