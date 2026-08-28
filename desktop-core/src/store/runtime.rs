@@ -505,3 +505,429 @@ async fn load_snapshot(shared: &Arc<Shared>, t: Option<f64>) {
     });
 }
 
+// ---- Timers ----
+
+async fn playback_tick_task(shared: Arc<Shared>) {
+    let mut last_tick = Instant::now();
+    let mut interval = tokio::time::interval(PLAYBACK_TICK);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        let now = Instant::now();
+        let elapsed = now.duration_since(last_tick).as_secs_f64();
+        last_tick = now;
+        // Only notify when something moved, so an idle app stays idle.
+        let changed = {
+            let mut state = shared.state.lock().expect("store lock");
+            state.apply_tick(elapsed)
+        };
+        if changed {
+            shared.changed.send_modify(|version| *version += 1);
+            let _ = shared.repaint.send(());
+        }
+    }
+}
+
+async fn availability_poll_task(shared: Arc<Shared>) {
+    let mut interval = tokio::time::interval(LIVE_AVAILABILITY_POLL_TICK);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        let due = {
+            let aux = shared.aux.lock().expect("aux lock");
+            let poll_delay_ms = shared.read(|store| {
+                playback::live_availability_poll_delay_ms(
+                    &store.live_availability,
+                    store.live_availability_message.as_deref(),
+                )
+            });
+            match aux.last_availability_check {
+                Some(last) => {
+                    poll_delay_ms.is_finite()
+                        && last.elapsed().as_millis() as f64 >= poll_delay_ms
+                }
+                None => true,
+            }
+        };
+        let should_check = due
+            && shared.read(|store| {
+                playback::should_poll_live_availability(&store.live_availability)
+                    && !store.live_availability_checking
+                    && !store.live_active
+                    && !store.live_simulation_active
+            });
+        if should_check {
+            check_openf1_live(&shared, CheckSource::Poll).await;
+        }
+    }
+}
+
+// ---- Live availability / live start orchestration ----
+
+async fn check_openf1_live(shared: &Arc<Shared>, source: CheckSource) {
+    let request_id = shared.update(|store| {
+        store.openf1_live_check_request_id += 1;
+        store.openf1_live_start_request_id += 1;
+        store.live_availability_checking = true;
+        if source != CheckSource::Poll {
+            store.live_availability_message = Some("Checking live race status...".to_string());
+        }
+        store.openf1_live_check_request_id
+    });
+    shared.aux.lock().expect("aux lock").last_availability_check = Some(Instant::now());
+
+    let current = shared.api.live_current().await;
+    let is_current =
+        |store: &ReplayStore| playback::should_apply_live_start_result(request_id, store.openf1_live_check_request_id);
+
+    let start_key = shared.update(|store| {
+        if !is_current(store) {
+            return None;
+        }
+        match &current {
+            Ok(current) => {
+                store.live_availability = current.availability.clone();
+                let key = current.session.as_ref().map(|session| session.session_key);
+                match key {
+                    Some(key) if current.active => {
+                        store.live_availability_message =
+                            Some("Opening active OpenF1 live session...".to_string());
+                        Some(key)
+                    }
+                    _ => {
+                        store.live_availability_message = playback::live_current_message(
+                            &current.availability,
+                            current.message.as_deref(),
+                            current.next_session.as_ref(),
+                            current.next_meeting.as_ref(),
+                        );
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                store.live_availability = LiveAvailability::Error;
+                store.live_availability_message =
+                    Some(playback::live_check_error_message(Some(&error.to_string())));
+                None
+            }
+        }
+    });
+
+    if let Some(key) = start_key {
+        if start_openf1_live(shared, key).await {
+            shared.update(|store| {
+                if is_current(store) {
+                    store.live_availability_message = None;
+                }
+            });
+        }
+    }
+
+    shared.update(|store| {
+        if is_current(store) {
+            store.live_availability_checking = false;
+        }
+    });
+}
+
+async fn start_openf1_live(shared: &Arc<Shared>, key: i64) -> bool {
+    let (request_id, simulation_stop_key) = shared.update(|store| {
+        store.openf1_live_start_request_id += 1;
+        store.live_simulation_start_request_id += 1;
+        store.playing = false;
+        let simulation_stop_key = store.live_simulation_active.then_some(store.session_key).flatten();
+        (store.openf1_live_start_request_id, simulation_stop_key)
+    });
+
+    let mut runtime_started = false;
+    macro_rules! stop_if_superseded {
+        () => {{
+            let superseded = shared.read(|store| {
+                !playback::should_apply_live_start_result(
+                    request_id,
+                    store.openf1_live_start_request_id,
+                )
+            });
+            if superseded {
+                if runtime_started {
+                    let _ = shared.api.live_stop(key).await;
+                }
+                return false;
+            }
+        }};
+    }
+
+    if let Some(simulation_key) = simulation_stop_key {
+        let _ = shared.api.live_simulation_stop(simulation_key).await;
+    }
+    stop_if_superseded!();
+
+    clear_openf1_live_reconnect(shared);
+    let stored_fallback = shared.read(|store| store.return_session_key_after_live);
+    shared.update(|store| {
+        store.live_simulation_active = false;
+        store.live_simulation_connection = SimConnection::Idle;
+        store.live_events.clear();
+        store.snapshot_error = None;
+        store.snapshot_loading = true;
+        store.live_connection = LiveConnection::Connecting;
+        store.return_session_key_after_live = stored_fallback.or(store.session_key);
+        store.snapshot_request_id += 1;
+        store.current_snapshot = None;
+    });
+
+    let started = shared.api.live_start(key).await;
+    match started {
+        Ok(_) => {
+            runtime_started = true;
+        }
+        Err(error) => {
+            stop_if_superseded!();
+            apply_live_start_error(shared, &error);
+            return false;
+        }
+    }
+    stop_if_superseded!();
+    let status = shared.api.live_status(key).await.ok();
+    stop_if_superseded!();
+    let metadata = match shared.api.live_metadata(key).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            stop_if_superseded!();
+            let _ = shared.api.live_stop(key).await;
+            apply_live_start_error(shared, &error);
+            return false;
+        }
+    };
+    stop_if_superseded!();
+    let snapshot = match shared.api.live_snapshot(key).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            stop_if_superseded!();
+            let _ = shared.api.live_stop(key).await;
+            apply_live_start_error(shared, &error);
+            return false;
+        }
+    };
+    stop_if_superseded!();
+    let geometry = shared.api.live_track_geometry(key).await.ok();
+    stop_if_superseded!();
+    let events = shared.api.live_events(key).await.ok();
+    stop_if_superseded!();
+
+    shared.update(|store| {
+        store.session_key = Some(key);
+        if let Some(status) = status.filter(|status| status.session_key == key) {
+            store.live_status = Some(status);
+        }
+        if metadata.session.session_key == key {
+            store.live_metadata = Some(metadata);
+        }
+        if snapshot.cursor.session_key == key {
+            store.time = snapshot.cursor.t;
+            store.current_snapshot = Some(snapshot);
+        }
+        if let Some(geometry) = geometry.filter(|geometry| geometry.session_key == key) {
+            store.live_geometry = Some(geometry);
+        }
+        if let Some(events) = events {
+            store.live_events = events.events;
+        }
+        store.live_active = true;
+        store.live_connection = LiveConnection::Connected;
+        store.snapshot_loading = false;
+    });
+    true
+}
+
+fn apply_live_start_error(shared: &Arc<Shared>, error: &ApiError) {
+    let text = error.to_string();
+    shared.update(|store| {
+        store.snapshot_error = Some(text.clone());
+        store.live_availability = playback::live_availability_after_start_error(Some(&text));
+        store.live_availability_message = Some(playback::live_start_error_message(Some(&text)));
+        store.live_connection = LiveConnection::Disconnected;
+        store.live_active = false;
+        store.clear_openf1_live_resources();
+        store.return_session_key_after_live = None;
+        store.snapshot_loading = false;
+    });
+}
+
+async fn stop_live(shared: &Arc<Shared>) {
+    let key = shared.update(|store| {
+        store.openf1_live_check_request_id += 1;
+        store.openf1_live_start_request_id += 1;
+        store.live_availability_checking = false;
+        store.session_key
+    });
+    clear_openf1_live_reconnect(shared);
+    if let Some(key) = key {
+        let _ = shared.api.live_stop(key).await;
+    }
+    shared.update(|store| {
+        let return_key =
+            playback::session_key_after_live_stops(store.session_key, store.return_session_key_after_live);
+        store.live_active = false;
+        store.live_availability = LiveAvailability::Inactive;
+        store.live_connection = LiveConnection::Idle;
+        store.clear_live_runtime_resources();
+        store.session_key = return_key;
+        store.return_session_key_after_live = None;
+        store.live_availability_message = Some("Live session stopped.".to_string());
+    });
+}
+
+fn stop_abandoned_live_runtimes(shared: &Arc<Shared>) {
+    let (live_key, simulation_key) = shared.read(|store| {
+        (
+            playback::openf1_live_session_key_to_stop(store.session_key, store.live_active),
+            playback::live_simulation_session_key_to_stop(
+                store.session_key,
+                store.live_simulation_active,
+            ),
+        )
+    });
+    if let Some(key) = live_key {
+        let api = shared.api.clone();
+        shared.tokio.spawn(async move {
+            let _ = api.live_stop(key).await;
+        });
+    }
+    if let Some(key) = simulation_key {
+        let api = shared.api.clone();
+        shared.tokio.spawn(async move {
+            let _ = api.live_simulation_stop(key).await;
+        });
+    }
+}
+
+async fn toggle_live_simulation(shared: &Arc<Shared>) {
+    let (request_id, key) = shared.update(|store| {
+        store.live_simulation_start_request_id += 1;
+        store.openf1_live_check_request_id += 1;
+        store.openf1_live_start_request_id += 1;
+        store.live_availability_checking = false;
+        (store.live_simulation_start_request_id, store.session_key)
+    });
+    let Some(key) = key else { return };
+
+    let is_current = |store: &ReplayStore| {
+        playback::should_apply_live_start_result(request_id, store.live_simulation_start_request_id)
+            && store.session_key == Some(key)
+    };
+    let mut runtime_started = false;
+    macro_rules! stop_if_superseded {
+        () => {{
+            if !shared.read(|store| is_current(store)) {
+                if runtime_started {
+                    let _ = shared.api.live_simulation_stop(key).await;
+                }
+                return;
+            }
+        }};
+    }
+
+    let (active, connecting) = shared.read(|store| {
+        (
+            store.live_simulation_active,
+            store.live_simulation_connection == SimConnection::Connecting,
+        )
+    });
+
+    // A connect still in flight: cancel it.
+    if !active && connecting {
+        let _ = shared.api.live_simulation_stop(key).await;
+        stop_if_superseded!();
+        shared.update(|store| {
+            store.live_simulation_connection = SimConnection::Idle;
+            store.snapshot_loading = false;
+            store.current_snapshot = None;
+        });
+        return;
+    }
+
+    if active {
+        let _ = shared.api.live_simulation_stop(key).await;
+        stop_if_superseded!();
+        shared.update(|store| {
+            store.live_simulation_active = false;
+            store.live_simulation_connection = SimConnection::Idle;
+            store.clear_live_runtime_resources();
+        });
+        return;
+    }
+
+    shared.update(|store| store.playing = false);
+    stop_abandoned_live_runtimes(shared);
+    clear_openf1_live_reconnect(shared);
+    shared.update(|store| {
+        store.live_active = false;
+        store.live_connection = LiveConnection::Idle;
+        store.live_status = None;
+        store.live_events.clear();
+        store.snapshot_error = None;
+        store.snapshot_loading = true;
+        store.live_simulation_connection = SimConnection::Connecting;
+        store.snapshot_request_id += 1;
+        store.current_snapshot = None;
+    });
+
+    match shared.api.live_simulation_start(key).await {
+        Ok(_) => runtime_started = true,
+        Err(error) => {
+            stop_if_superseded!();
+            let text = error.to_string();
+            shared.update(|store| {
+                store.snapshot_error = Some(text);
+                store.live_simulation_connection = SimConnection::Disconnected;
+                store.live_simulation_active = false;
+                store.snapshot_loading = false;
+            });
+            return;
+        }
+    }
+    stop_if_superseded!();
+    let snapshot = match shared.api.live_simulation_snapshot(key).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            stop_if_superseded!();
+            let text = error.to_string();
+            shared.update(|store| {
+                if is_current(store) {
+                    store.snapshot_error = Some(text);
+                    store.live_simulation_connection = SimConnection::Disconnected;
+                    store.live_simulation_active = false;
+                    store.snapshot_loading = false;
+                }
+            });
+            return;
+        }
+    };
+    stop_if_superseded!();
+    let mismatched = shared.read(|store| Some(snapshot.cursor.session_key) != store.session_key);
+    if mismatched {
+        let _ = shared.api.live_simulation_stop(key).await;
+        return;
+    }
+    shared.update(|store| {
+        store.time = snapshot.cursor.t;
+        store.current_snapshot = Some(snapshot);
+        store.live_simulation_active = true;
+        if is_current(store) {
+            store.snapshot_loading = false;
+        }
+    });
+}
+
+// ---- SSE stream reconciliation ----
+
+fn next_generation(gate: &AtomicU64) -> u64 {
+    gate.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn gate_current(gate: &AtomicU64, generation: u64) -> bool {
+    gate.load(Ordering::SeqCst) == generation
+}
+
