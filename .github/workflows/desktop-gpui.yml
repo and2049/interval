@@ -60,12 +60,12 @@ jobs:
         run: ldd target/release/interval-desktop | grep -q libxkbcommon
 
       # Archived on the build runner because upload-artifact drops the executable bit.
+      # Names carry no version so `releases/latest/download/<name>` resolves for the installers.
       - name: Package
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${{ inputs.version }}"
-          NAME="interval-desktop-${VERSION:-dev}-${{ matrix.target }}"
+          NAME="interval-desktop-${{ matrix.target }}"
           mkdir -p dist
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a "dist/${NAME}.zip" "./target/release/${{ matrix.binary }}" > /dev/null

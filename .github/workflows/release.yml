@@ -69,13 +69,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           pattern: interval-desktop-*
           path: dist
           merge-multiple: true
 
-      # Draft: the release is reviewed and published by hand.
+      # Draft: the release is reviewed and published by hand. The installers are
+      # attached so `releases/latest/download/install` always matches the binaries.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -84,4 +87,7 @@ jobs:
           name: ${{ needs.version.outputs.tag }}
           draft: true
           generate_release_notes: true
-          files: dist/*
+          files: |
+            dist/*
+            install
+            install.ps1

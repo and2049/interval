@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -euo pipefail
+APP=interval-desktop
+REPO=and2049/interval
+INSTALL_DIR="${INTERVAL_INSTALL_DIR:-$HOME/.interval/bin}"
+
+MUTED='\033[0;2m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+usage() {
+    cat <<USAGE
+Interval Installer
+
+Usage: install [options]
+
+Options:
+    -h, --help              Display this help message
+    -v, --version <version> Install a specific version (e.g. 26-9-6.0)
+        --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
+
+Examples:
+    curl -fsSL https://github.com/$REPO/releases/latest/download/install | bash
+    curl -fsSL https://github.com/$REPO/releases/latest/download/install | bash -s -- --version 26-9-6.0
+USAGE
+}
+
+requested_version=${VERSION:-}
+no_modify_path=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        -v|--version)
+            [[ -n "${2:-}" ]] || { echo -e "${RED}Error: --version requires a version argument${NC}" >&2; exit 1; }
+            requested_version="$2"; shift 2 ;;
+        --no-modify-path) no_modify_path=true; shift ;;
+        *) echo -e "${RED}Unknown option '$1'${NC}" >&2; usage >&2; exit 1 ;;
+    esac
+done
+
+case "$(uname -s)" in
+    Darwin*) os=macos ;;
+    Linux*) os=linux ;;
+    *) echo -e "${RED}Unsupported OS: $(uname -s). On Windows use install.ps1.${NC}" >&2; exit 1 ;;
+esac
+arch=$(uname -m)
+case "$arch" in
+    x86_64) arch=x64 ;;
+    arm64|aarch64) arch=arm64 ;;
+esac
+if [ "$os" = macos ] && [ "$arch" = x64 ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ]; then
+    arch=arm64
+fi
+target="$os-$arch"
+case "$target" in
+    linux-x64|macos-arm64) ;;
+    *) echo -e "${RED}No prebuilt binary for $target. Build from source: cargo build --release -p $APP${NC}" >&2; exit 1 ;;
+esac
+filename="$APP-$target.tar.gz"
+
+for tool in curl tar; do
+    command -v "$tool" >/dev/null 2>&1 || { echo -e "${RED}Error: '$tool' is required but not installed.${NC}" >&2; exit 1; }
+done
+
+if [ -z "$requested_version" ]; then
+    version=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+    [ -n "$version" ] || { echo -e "${RED}Failed to fetch version information${NC}" >&2; exit 1; }
+    url="https://github.com/$REPO/releases/latest/download/$filename"
+else
+    version="${requested_version#v}"
+    url="https://github.com/$REPO/releases/download/v$version/$filename"
+fi
+
+version_file="$INSTALL_DIR/version"
+if [ -x "$INSTALL_DIR/$APP" ] && [ -f "$version_file" ] && [ "$(cat "$version_file")" = "$version" ]; then
+    echo -e "${MUTED}Version ${NC}$version${MUTED} already installed${NC}"
+    exit 0
+fi
+
+echo -e "${MUTED}Installing ${NC}interval ${MUTED}version: ${NC}$version"
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
+if ! curl -fL -# -o "$tmp_dir/$filename" "$url"; then
+    echo -e "${RED}Failed to download $url${NC}" >&2
+    echo -e "${MUTED}Available releases: https://github.com/$REPO/releases${NC}" >&2
+    exit 1
+fi
+tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
+mkdir -p "$INSTALL_DIR"
+mv -f "$tmp_dir/$APP" "$INSTALL_DIR/$APP"
+chmod 755 "$INSTALL_DIR/$APP"
+echo "$version" > "$version_file"
+
+add_to_path() {
+    local config_file=$1 command=$2
+    if grep -Fxq "$command" "$config_file"; then
+        return
+    elif [[ -w $config_file ]]; then
+        printf '\n# interval\n%s\n' "$command" >> "$config_file"
+        echo -e "${MUTED}Added ${NC}$INSTALL_DIR${MUTED} to \$PATH in ${NC}$config_file"
+    else
+        echo -e "Manually add the directory to $config_file (or similar):\n  $command"
+    fi
+}
+
+if [[ "$no_modify_path" != true ]] && [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+    current_shell=$(basename "${SHELL:-sh}")
+    case $current_shell in
+        fish) config_files="$HOME/.config/fish/config.fish"; command="fish_add_path $INSTALL_DIR" ;;
+        zsh) config_files="$HOME/.zshrc $HOME/.zshenv $XDG_CONFIG_HOME/zsh/.zshrc $XDG_CONFIG_HOME/zsh/.zshenv"; command="export PATH=$INSTALL_DIR:\$PATH" ;;
+        bash) config_files="$HOME/.bashrc $HOME/.bash_profile $HOME/.profile $XDG_CONFIG_HOME/bash/.bashrc"; command="export PATH=$INSTALL_DIR:\$PATH" ;;
+        *) config_files="$HOME/.profile"; command="export PATH=$INSTALL_DIR:\$PATH" ;;
+    esac
+    config_file=""
+    for file in $config_files; do
+        [[ -f $file ]] && { config_file=$file; break; }
+    done
+    if [[ -z $config_file ]]; then
+        echo -e "No config file found for $current_shell. Add this to your shell startup file:\n  $command"
+    else
+        add_to_path "$config_file" "$command"
+    fi
+fi
+
+if [ "${GITHUB_ACTIONS-}" = true ]; then
+    echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+fi
+
+echo -e "\ninterval installed successfully!\n"
+echo -e "$APP  ${MUTED}# Open the dashboard (restart your shell first if PATH was just updated)${NC}"
+echo -e "\n${MUTED}For more information visit ${NC}https://github.com/$REPO\n"
