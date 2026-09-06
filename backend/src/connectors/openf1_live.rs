@@ -1054,3 +1054,694 @@ impl DateYear for DateTime<Utc> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::SessionType;
+
+    #[test]
+    fn live_window_does_not_mark_pre_session_padding_active() {
+        let session = Session {
+            session_key: 1,
+            meeting_key: 2,
+            year: 2026,
+            name: "Race".to_string(),
+            session_type: SessionType::Race,
+            start_time: "2026-06-28T13:00:00Z".to_string(),
+            end_time: "2026-06-28T15:00:00Z".to_string(),
+            total_laps: 0,
+        };
+
+        let now = DateTime::parse_from_rfc3339("2026-06-28T12:45:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(live_window_rank(&session, now).is_none());
+    }
+
+    #[test]
+    fn next_live_session_from_schedule_includes_pre_session_candidates() {
+        let sprint = session(
+            1,
+            "Sprint",
+            SessionType::Sprint,
+            "2026-06-28T12:00:00Z",
+            "2026-06-28T13:00:00Z",
+        );
+        let race = session(
+            2,
+            "Race",
+            SessionType::Race,
+            "2026-06-28T13:20:00Z",
+            "2026-06-28T15:20:00Z",
+        );
+        let now = DateTime::parse_from_rfc3339("2026-06-28T13:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let next = next_live_session_from_schedule(&[sprint, race], &[], now).unwrap();
+
+        assert_eq!(next.session.session_key, 2);
+    }
+
+    #[test]
+    fn live_window_rank_prefers_in_progress_session() {
+        let pre_race = session(
+            2,
+            "Race",
+            SessionType::Race,
+            "2026-06-28T13:20:00Z",
+            "2026-06-28T15:20:00Z",
+        );
+        let live_sprint = session(
+            1,
+            "Sprint",
+            SessionType::Sprint,
+            "2026-06-28T12:00:00Z",
+            "2026-06-28T13:10:00Z",
+        );
+        let now = DateTime::parse_from_rfc3339("2026-06-28T13:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(live_window_rank(&live_sprint, now).is_some());
+        assert!(live_window_rank(&pre_race, now).is_none());
+    }
+
+    #[test]
+    fn live_window_rank_defaults_when_end_time_is_before_start() {
+        let race = session(
+            1,
+            "Race",
+            SessionType::Race,
+            "2026-06-28T13:00:00Z",
+            "2026-06-28T12:00:00Z",
+        );
+        let now = DateTime::parse_from_rfc3339("2026-06-28T14:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(live_window_rank(&race, now).is_some());
+    }
+
+    #[test]
+    fn next_live_session_from_schedule_picks_earliest_future_session() {
+        let now = DateTime::parse_from_rfc3339("2026-06-28T13:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let sessions = vec![
+            session(
+                3,
+                "Race",
+                SessionType::Race,
+                "2026-06-29T13:00:00Z",
+                "2026-06-29T15:00:00Z",
+            ),
+            session(
+                1,
+                "Sprint",
+                SessionType::Sprint,
+                "2026-06-28T12:00:00Z",
+                "2026-06-28T13:00:00Z",
+            ),
+            session(
+                2,
+                "Race",
+                SessionType::Race,
+                "2026-06-28T14:00:00Z",
+                "2026-06-28T16:00:00Z",
+            ),
+        ];
+
+        let next = next_live_session_from_schedule(&sessions, &[], now).unwrap();
+
+        assert_eq!(next.session.session_key, 2);
+    }
+
+    #[tokio::test]
+    async fn invalid_live_configuration_is_reported_before_requests() {
+        let client = OpenF1LiveClient::with_config_error(
+            OpenF1LiveConfig {
+                enabled: true,
+                base_url: Url::parse(DEFAULT_BASE_URL).unwrap(),
+                auth: OpenF1Auth::None,
+                auth_header: AUTHORIZATION.as_str().to_string(),
+            },
+            "INTERVAL_OPENF1_LIVE_BASE_URL is invalid",
+        );
+
+        let error = client.current_session(Utc::now()).await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("OpenF1 live configuration error"));
+    }
+
+    #[test]
+    fn invalid_env_base_url_records_configuration_error() {
+        let (base_url, error) = live_base_url_from_env_value(Some("not a valid url".to_string()));
+
+        assert_eq!(base_url.as_str(), DEFAULT_BASE_URL);
+        assert!(error
+            .as_deref()
+            .is_some_and(|message| message.contains("INTERVAL_OPENF1_LIVE_BASE_URL")));
+    }
+
+    #[test]
+    fn live_enabled_defaults_to_on_unless_explicitly_disabled() {
+        assert!(live_enabled_from_env_value(None));
+        assert!(live_enabled_from_env_value(Some("true".to_string())));
+        assert!(live_enabled_from_env_value(Some("".to_string())));
+        assert!(!live_enabled_from_env_value(Some("false".to_string())));
+        assert!(!live_enabled_from_env_value(Some("0".to_string())));
+        assert!(!live_enabled_from_env_value(Some("off".to_string())));
+    }
+
+    #[test]
+    fn configured_base_url_keeps_version_path_when_trailing_slash_is_missing() {
+        let (base_url, error) =
+            live_base_url_from_env_value(Some("https://example.test/v1".to_string()));
+
+        assert_eq!(
+            base_url.join("sessions").unwrap().as_str(),
+            "https://example.test/v1/sessions"
+        );
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn explicit_config_keeps_version_path_when_trailing_slash_is_missing() {
+        let client = OpenF1LiveClient::with_config(OpenF1LiveConfig {
+            enabled: true,
+            base_url: Url::parse("https://example.test/v1").unwrap(),
+            auth: OpenF1Auth::None,
+            auth_header: AUTHORIZATION.as_str().to_string(),
+        });
+
+        assert_eq!(
+            client.config().base_url.join("sessions").unwrap().as_str(),
+            "https://example.test/v1/sessions"
+        );
+    }
+
+    #[test]
+    fn live_endpoint_params_add_incremental_date_filter_only_for_timestamped_endpoints() {
+        let since = DateTime::parse_from_rfc3339("2026-06-28T13:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert_eq!(
+            live_endpoint_params(42, "location", Some(since)),
+            vec![
+                ("session_key".to_string(), "42".to_string()),
+                (
+                    "date>=".to_string(),
+                    "2026-06-28T13:00:00+00:00".to_string()
+                )
+            ]
+        );
+        assert_eq!(
+            live_endpoint_params(42, "drivers", Some(since)),
+            vec![("session_key".to_string(), "42".to_string())]
+        );
+    }
+
+    #[test]
+    fn live_endpoint_url_keeps_filter_operators_unencoded() {
+        let since = DateTime::parse_from_rfc3339("2026-09-06T13:50:47.933Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let url = live_endpoint_url(
+            &Url::parse(DEFAULT_BASE_URL).unwrap(),
+            "intervals",
+            &live_endpoint_params(11361, "intervals", Some(since)),
+        )
+        .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.openf1.org/v1/intervals?session_key=11361&date%3E=2026-09-06T13%3A50%3A47.933%2B00%3A00"
+        );
+        assert_eq!(
+            percent_encoding_free(url.query().unwrap()),
+            "session_key=11361&date>=2026-09-06T13:50:47.933+00:00"
+        );
+    }
+
+    /// What OpenF1 sees after decoding the query string.
+    fn percent_encoding_free(query: &str) -> String {
+        url::form_urlencoded::parse(query.as_bytes())
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
+    #[test]
+    fn no_results_body_is_recognised() {
+        assert!(is_no_results_body(r#"{"detail":"No results found."}"#));
+        assert!(!is_no_results_body(r#"{"detail":"Not Found"}"#));
+        assert!(!is_no_results_body(""));
+        assert!(!is_no_results_body("<html>404</html>"));
+    }
+
+    #[test]
+    fn only_location_is_windowed_on_the_first_fetch_and_only_with_a_date_field() {
+        for spec in LIVE_ENDPOINTS {
+            if spec.name == "location" {
+                assert_eq!(spec.initial_window_seconds, Some(240));
+            } else {
+                assert_eq!(spec.initial_window_seconds, None, "{}", spec.name);
+            }
+            if spec.initial_window_seconds.is_some() {
+                assert!(spec.incremental_field.is_some(), "{} cannot be windowed", spec.name);
+            }
+        }
+        let now = DateTime::parse_from_rfc3339("2026-09-06T14:40:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let location = LIVE_ENDPOINTS.iter().find(|spec| spec.name == "location").unwrap();
+        assert_eq!(
+            location.initial_since(now).unwrap().to_rfc3339(),
+            "2026-09-06T14:36:00+00:00"
+        );
+    }
+
+    #[test]
+    fn live_endpoint_cadences_stay_under_the_openf1_rate_limit() {
+        let per_minute: f64 = LIVE_ENDPOINTS
+            .iter()
+            .map(|spec| 60_000.0 / spec.cadence_ms as f64)
+            .sum();
+        assert!(
+            per_minute <= OPENF1_LIVE_REQUESTS_PER_MINUTE as f64 - 2.0,
+            "{per_minute} requests/min leaves no room under the {OPENF1_LIVE_REQUESTS_PER_MINUTE}/min budget"
+        );
+        assert!(OPENF1_LIVE_REQUESTS_PER_MINUTE <= 60);
+        let limiter_per_second = 1_000.0 / OPENF1_LIVE_REQUEST_INTERVAL_MS as f64;
+        assert!(limiter_per_second < 6.0, "{limiter_per_second} requests/s");
+    }
+
+    #[tokio::test]
+    async fn request_limiter_enforces_the_per_window_budget() {
+        let window = Duration::from_millis(300);
+        let mut limiter = LiveRequestLimiter::new(Duration::ZERO, 3, window);
+        let started = Instant::now();
+        for _ in 0..3 {
+            limiter.wait_turn().await;
+        }
+        assert!(started.elapsed() < Duration::from_millis(100), "budget should be free");
+        limiter.wait_turn().await;
+        assert!(
+            started.elapsed() >= window,
+            "fourth request should wait for the window: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn request_limiter_pause_holds_every_request() {
+        let mut limiter = LiveRequestLimiter::new(Duration::ZERO, usize::MAX, Duration::from_secs(60));
+        let pause = Duration::from_millis(200);
+        limiter.pause_until(Instant::now() + pause);
+        let started = Instant::now();
+        limiter.wait_turn().await;
+        assert!(started.elapsed() >= pause, "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn retry_after_reads_seconds_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, HeaderValue::from_static("7"));
+        assert_eq!(retry_after(&headers), Some(Duration::from_secs(7)));
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            HeaderValue::from_static("Wed, 21 Oct 2015 07:28:00 GMT"),
+        );
+        assert_eq!(retry_after(&headers), None);
+        assert_eq!(retry_after(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn live_endpoint_cadence_seconds_uses_endpoint_specs() {
+        assert_eq!(live_endpoint_cadence_seconds("location"), 5.0);
+        assert_eq!(live_endpoint_cadence_seconds("weather"), 60.0);
+        assert_eq!(live_endpoint_cadence_seconds("unknown"), 1.0);
+    }
+
+    #[test]
+    fn authorization_header_value_accepts_raw_or_prefixed_tokens() {
+        assert_eq!(authorization_header_value("abc123"), "Bearer abc123");
+        assert_eq!(authorization_header_value("Bearer abc123"), "Bearer abc123");
+        assert_eq!(authorization_header_value("bearer abc123"), "bearer abc123");
+        assert_eq!(
+            authorization_header_value("  Bearer abc123"),
+            "Bearer abc123"
+        );
+    }
+
+    #[test]
+    fn token_url_is_at_the_api_host_root() {
+        assert_eq!(
+            token_url(&Url::parse(DEFAULT_BASE_URL).unwrap())
+                .unwrap()
+                .as_str(),
+            "https://api.openf1.org/token"
+        );
+        assert_eq!(
+            token_url(&Url::parse("https://example.test/v1/").unwrap())
+                .unwrap()
+                .as_str(),
+            "https://example.test/token"
+        );
+    }
+
+    #[test]
+    fn token_response_accepts_expires_in_as_string_or_number() {
+        let text: TokenResponse = serde_json::from_str(
+            r#"{"expires_in":"3600","access_token":"t","token_type":"bearer"}"#,
+        )
+        .unwrap();
+        assert_eq!(text.expires_in, Some(3_600));
+        let number: TokenResponse =
+            serde_json::from_str(r#"{"expires_in":3600,"access_token":"t"}"#).unwrap();
+        assert_eq!(number.expires_in, Some(3_600));
+        let unparseable: TokenResponse =
+            serde_json::from_str(r#"{"expires_in":"soon","access_token":"t"}"#).unwrap();
+        assert_eq!(unparseable.expires_in, None);
+        let missing: TokenResponse = serde_json::from_str(r#"{"access_token":"t"}"#).unwrap();
+        assert_eq!(missing.expires_in, None);
+    }
+
+    #[test]
+    fn token_lifetime_keeps_a_refresh_margin() {
+        assert_eq!(token_lifetime(Some(3_600)), Duration::from_secs(3_480));
+        assert_eq!(token_lifetime(None), Duration::from_secs(3_480));
+        assert_eq!(token_lifetime(Some(30)), Duration::ZERO);
+    }
+
+    /// A stand-in for api.openf1.org: issues numbered tokens at `/token` for one
+    /// accepted login and answers `/v1/sessions` only for tokens it still honours.
+    mod mock {
+        use axum::{
+            extract::State,
+            http::{HeaderMap, StatusCode},
+            routing::{get, post},
+            Form, Json, Router,
+        };
+        use serde::Deserialize;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        pub struct Recorded {
+            pub exchanges: usize,
+            pub revoked: Vec<String>,
+            pub seen_authorization: Vec<String>,
+        }
+
+        #[derive(Clone)]
+        struct MockState {
+            recorded: Arc<Mutex<Recorded>>,
+            expires_in: Option<u64>,
+        }
+
+        #[derive(Deserialize)]
+        struct LoginForm {
+            username: String,
+            password: String,
+        }
+
+        pub struct Server {
+            pub base_url: reqwest::Url,
+            pub recorded: Arc<Mutex<Recorded>>,
+        }
+
+        pub async fn spawn(expires_in: Option<u64>) -> Server {
+            let recorded = Arc::new(Mutex::new(Recorded::default()));
+            let app = Router::new()
+                .route("/token", post(token))
+                .route("/v1/sessions", get(sessions))
+                .route("/v1/session_result", get(no_results))
+                .route("/v1/laps", get(too_many_requests))
+                .with_state(MockState {
+                    recorded: Arc::clone(&recorded),
+                    expires_in,
+                });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            Server {
+                base_url: format!("http://{addr}/v1/").parse().unwrap(),
+                recorded,
+            }
+        }
+
+        async fn token(
+            State(state): State<MockState>,
+            Form(form): Form<LoginForm>,
+        ) -> Result<Json<serde_json::Value>, StatusCode> {
+            if form.username != "driver@example.com" || form.password != "correct horse" {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            let mut recorded = state.recorded.lock().unwrap();
+            recorded.exchanges += 1;
+            let mut body = serde_json::json!({
+                "access_token": format!("issued-{}", recorded.exchanges),
+                "token_type": "bearer",
+            });
+            if let Some(expires_in) = state.expires_in {
+                // OpenF1 sends this as a string, not a number.
+                body["expires_in"] = serde_json::json!(expires_in.to_string());
+            }
+            Ok(Json(body))
+        }
+
+        async fn too_many_requests() -> (StatusCode, [(&'static str, &'static str); 1], &'static str) {
+            (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "3")], "")
+        }
+
+        async fn no_results() -> (StatusCode, Json<serde_json::Value>) {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "detail": "No results found." })),
+            )
+        }
+
+        async fn sessions(
+            State(state): State<MockState>,
+            headers: HeaderMap,
+        ) -> Result<Json<serde_json::Value>, StatusCode> {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let mut recorded = state.recorded.lock().unwrap();
+            recorded.seen_authorization.push(authorization.clone());
+            let token = authorization.strip_prefix("Bearer ").unwrap_or_default();
+            if !token.starts_with("issued-") || recorded.revoked.iter().any(|r| r == token) {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            Ok(Json(serde_json::json!([])))
+        }
+    }
+
+    fn login_client(base_url: Url) -> OpenF1LiveClient {
+        OpenF1LiveClient::with_config(OpenF1LiveConfig {
+            enabled: true,
+            base_url,
+            auth: OpenF1Auth::Login(OpenF1Login {
+                username: "driver@example.com".to_string(),
+                password: "correct horse".to_string(),
+            }),
+            auth_header: AUTHORIZATION.as_str().to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn login_is_exchanged_once_and_the_token_reused() {
+        let server = mock::spawn(Some(3_600)).await;
+        let client = login_client(server.base_url.clone());
+
+        client.probe().await.unwrap();
+        client.probe().await.unwrap();
+
+        let recorded = server.recorded.lock().unwrap();
+        assert_eq!(recorded.exchanges, 1);
+        assert_eq!(
+            recorded.seen_authorization,
+            vec!["Bearer issued-1".to_string(), "Bearer issued-1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_token_is_exchanged_again_before_the_next_request() {
+        // `expires_in` at or under the refresh margin leaves no usable lifetime, so the
+        // second request must go back to the token endpoint.
+        let server = mock::spawn(Some(60)).await;
+        let client = login_client(server.base_url.clone());
+
+        client.probe().await.unwrap();
+        client.probe().await.unwrap();
+
+        let recorded = server.recorded.lock().unwrap();
+        assert_eq!(recorded.exchanges, 2);
+        assert_eq!(recorded.seen_authorization.last().unwrap(), "Bearer issued-2");
+    }
+
+    #[tokio::test]
+    async fn revoked_cached_token_is_exchanged_again_and_the_request_retried_once() {
+        let server = mock::spawn(Some(3_600)).await;
+        let client = login_client(server.base_url.clone());
+        client.probe().await.unwrap();
+        server
+            .recorded
+            .lock()
+            .unwrap()
+            .revoked
+            .push("issued-1".to_string());
+
+        client.probe().await.unwrap();
+
+        let recorded = server.recorded.lock().unwrap();
+        assert_eq!(recorded.exchanges, 2);
+        assert_eq!(
+            recorded.seen_authorization,
+            vec![
+                "Bearer issued-1".to_string(),
+                "Bearer issued-1".to_string(),
+                "Bearer issued-2".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_token_that_is_rejected_is_not_exchanged_again() {
+        let server = mock::spawn(Some(3_600)).await;
+        let client = login_client(server.base_url.clone());
+        // Revoke every token the mock will ever issue.
+        {
+            let mut recorded = server.recorded.lock().unwrap();
+            recorded.revoked.push("issued-1".to_string());
+            recorded.revoked.push("issued-2".to_string());
+        }
+
+        let error = client.probe().await.unwrap_err();
+
+        assert!(matches!(error, OpenF1LiveError::Unauthorized(401)), "{error}");
+        assert_eq!(server.recorded.lock().unwrap().exchanges, 1);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_login_reports_unauthorized() {
+        let server = mock::spawn(Some(3_600)).await;
+        let client = OpenF1LiveClient::with_config(OpenF1LiveConfig {
+            enabled: true,
+            base_url: server.base_url.clone(),
+            auth: OpenF1Auth::Login(OpenF1Login {
+                username: "driver@example.com".to_string(),
+                password: "wrong".to_string(),
+            }),
+            auth_header: AUTHORIZATION.as_str().to_string(),
+        });
+
+        let error = client.probe().await.unwrap_err();
+
+        assert!(matches!(error, OpenF1LiveError::Unauthorized(401)), "{error}");
+        assert!(server.recorded.lock().unwrap().seen_authorization.is_empty());
+    }
+
+    #[tokio::test]
+    async fn changing_the_login_forgets_the_issued_token() {
+        let server = mock::spawn(Some(3_600)).await;
+        let client = login_client(server.base_url.clone());
+        client.probe().await.unwrap();
+
+        client
+            .set_auth(OpenF1Auth::Login(OpenF1Login {
+                username: "driver@example.com".to_string(),
+                password: "correct horse".to_string(),
+            }))
+            .await;
+        client.probe().await.unwrap();
+
+        assert_eq!(server.recorded.lock().unwrap().exchanges, 2);
+    }
+
+    #[tokio::test]
+    async fn a_no_results_404_is_an_empty_payload_and_any_other_404_is_an_error() {
+        let server = mock::spawn(Some(3_600)).await;
+        let client = login_client(server.base_url.clone());
+
+        let payload = client
+            .fetch_live_bundle_endpoint(11361, "session_result")
+            .await
+            .unwrap()
+            .payload;
+        assert_eq!(payload, Value::Array(vec![]));
+
+        // Axum's fallback answers an unknown route with an empty-bodied 404.
+        let error = client
+            .fetch_live_bundle_endpoint(11361, "nowhere")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, OpenF1LiveError::Status { status: 404, .. }),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_429_pauses_the_limiter_for_retry_after() {
+        let server = mock::spawn(Some(3_600)).await;
+        let client = login_client(server.base_url.clone());
+
+        let error = client
+            .fetch_live_bundle_endpoint(11361, "laps")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, OpenF1LiveError::RateLimited { pause_seconds: 3, .. }),
+            "{error}"
+        );
+        let paused_until = client.request_limiter.lock().await.paused_until.unwrap();
+        let remaining = paused_until.saturating_duration_since(Instant::now());
+        assert!(remaining > Duration::from_secs(2) && remaining <= Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn a_static_token_is_sent_without_an_exchange() {
+        let server = mock::spawn(Some(3_600)).await;
+        let client = OpenF1LiveClient::with_config(OpenF1LiveConfig {
+            enabled: true,
+            base_url: server.base_url.clone(),
+            auth: OpenF1Auth::Token("issued-static".to_string()),
+            auth_header: AUTHORIZATION.as_str().to_string(),
+        });
+
+        client.probe().await.unwrap();
+
+        let recorded = server.recorded.lock().unwrap();
+        assert_eq!(recorded.exchanges, 0);
+        assert_eq!(recorded.seen_authorization, vec!["Bearer issued-static".to_string()]);
+    }
+
+    fn session(
+        session_key: i64,
+        name: &str,
+        session_type: SessionType,
+        start_time: &str,
+        end_time: &str,
+    ) -> Session {
+        Session {
+            session_key,
+            meeting_key: 2,
+            year: 2026,
+            name: name.to_string(),
+            session_type,
+            start_time: start_time.to_string(),
+            end_time: end_time.to_string(),
+            total_laps: 0,
+        }
+    }
+}
