@@ -12,7 +12,7 @@ use interval_desktop_core::settings_panel::{
 };
 
 use super::ui;
-use crate::{IntervalApp, theme};
+use crate::{IntervalApp, theme, updates::UpdateState};
 
 /// UI state for the popover. The settings themselves are `None` until the initial
 /// fetch settles, and `Some(None)` when the routes are unavailable (a web deployment),
@@ -110,7 +110,7 @@ pub fn settings_menu(
     let can_clear = !busy && current.source == settings_panel::OpenF1AuthSource::Settings;
 
     let action_button = |id: &'static str,
-                         label: &'static str,
+                         label: SharedString,
                          enabled: bool,
                          accent: bool,
                          cx: &mut Context<IntervalApp>,
@@ -176,6 +176,41 @@ pub fn settings_menu(
         password_placeholder,
     );
 
+    let (update_label, update_hint, update_active) = app.update_state.presentation();
+    let update_available = matches!(app.update_state, UpdateState::Available(_));
+    let version_line = match interval_desktop_core::update::current_version() {
+        Some(version) => format!("Version {version}"),
+        None => "Development build".to_string(),
+    };
+    let update_section = div()
+        .mt_2()
+        .pt_2()
+        .border_t_1()
+        .border_color(theme::LINE())
+        .child(
+            div()
+                .mb_2()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme::ACCENT())
+                .child("APP"),
+        )
+        .child(div().mb_2().text_color(ui::muted()).child(version_line))
+        .child(action_button(
+            "settings-update",
+            update_label.into(),
+            update_active,
+            update_available,
+            cx,
+            |this, cx| this.update_button_clicked(cx),
+        ))
+        .children(update_hint.map(|hint| {
+            div()
+                .mt_2()
+                .text_size(rems(0.62))
+                .text_color(ui::muted())
+                .child(hint)
+        }));
+
     Some(
         div()
             .relative()
@@ -186,7 +221,11 @@ pub fn settings_menu(
                     .id("settings-toggle")
                     .rounded(px(3.0))
                     .border_1()
-                    .border_color(theme::LINE())
+                    .border_color(if update_available {
+                        theme::ACCENT()
+                    } else {
+                        theme::LINE()
+                    })
                     .p_2()
                     .cursor_pointer()
                     .hover(|style| style.border_color(theme::ACCENT()))
@@ -278,7 +317,7 @@ pub fn settings_menu(
                                         .gap_2()
                                         .child(action_button(
                                             "settings-save",
-                                            "SIGN IN",
+                                            "SIGN IN".into(),
                                             can_save,
                                             true,
                                             cx,
@@ -286,7 +325,7 @@ pub fn settings_menu(
                                         ))
                                         .child(action_button(
                                             "settings-test",
-                                            "TEST",
+                                            "TEST".into(),
                                             can_test,
                                             false,
                                             cx,
@@ -294,7 +333,7 @@ pub fn settings_menu(
                                         ))
                                         .child(action_button(
                                             "settings-clear",
-                                            "SIGN OUT",
+                                            "SIGN OUT".into(),
                                             can_clear,
                                             false,
                                             cx,
@@ -332,7 +371,8 @@ pub fn settings_menu(
                                         .text_size(rems(0.62))
                                         .text_color(ui::faint())
                                         .child(format!("Stored in {path}"))
-                                })),
+                                }))
+                                .child(update_section),
                         ),
                 ))
             }),

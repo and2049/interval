@@ -22,6 +22,8 @@ irm https://github.com/and2049/interval/releases/latest/download/install.ps1 | i
 
 Pass `--version 26-9-6.0` (bash) or `-Version 26-9-6.0` (PowerShell) to pin a release; re-running the installer upgrades in place. To build from source instead, see [Desktop App](#desktop-app).
 
+Once installed, the app updates itself: the gear menu in the top bar shows the running version and a **CHECK FOR UPDATES** button (the app also checks once at startup and highlights the gear when a newer release exists). Installing downloads the platform archive for the newest release, swaps the binary in place, and offers a **RESTART**. Development builds (`cargo run`) report no version and never update themselves; the button sends them to the releases page instead.
+
 ## Current Shape
 
 - `backend/`: Rust API service with Axum, SQLite, FastF1 historical ingest, OpenF1 discovery/live polling, replay generation, track geometry, and SSE streaming.
@@ -150,7 +152,7 @@ To re-run for an explicit tag (e.g. after deleting a failed draft), use `workflo
 | `macos-latest` | `interval-desktop-macos-arm64.tar.gz` |
 | `ubuntu-latest` | `interval-desktop-linux-x64.tar.gz` |
 
-Archive names carry no version so the installers can fetch `releases/latest/download/<archive>`; the release tag is the version. Archives are created on the build runner rather than in the release job because `upload-artifact` drops the executable bit. The workflow passes `INTERVAL_VERSION` to `cargo build`; `desktop-gpui/build.rs` stamps it into the Windows `VERSIONINFO` resource and falls back to the crate version when unset. `Cargo.toml` versions are not bumped per release; the date tag is the release identifier.
+Archive names carry no version so the installers and the in-app updater (`desktop-core/src/update.rs`) can fetch `releases/latest/download/<archive>`; the release tag is the version, and the updater orders tags by date and then same-day index. Archives are created on the build runner rather than in the release job because `upload-artifact` drops the executable bit. The workflow passes `INTERVAL_VERSION` to `cargo build`; `desktop-gpui/build.rs` stamps it into the Windows `VERSIONINFO` resource, and `desktop-core` reads it at compile time as the running version. A build without it is a development build that refuses to update itself. `Cargo.toml` versions are not bumped per release; the date tag is the release identifier.
 
 At runtime the app enters a per-user data directory before starting the backend, which resolves every path it touches (`.env`, `interval.db`, `backend/assets/tracks`, `scripts/`, `cache/`) relative to that directory. It is `<app-data>/interval/data`:
 

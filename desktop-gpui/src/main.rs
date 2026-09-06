@@ -15,6 +15,7 @@ mod assets;
 mod embed;
 mod persist;
 mod theme;
+mod updates;
 mod views;
 
 use gpui::{
@@ -96,11 +97,13 @@ pub struct IntervalApp {
     pub(crate) map_last_snapshot: Option<interval_backend::domain::ReplaySnapshot>,
     /// The OpenF1 account popover's state.
     pub(crate) settings: views::SettingsUi,
+    /// The settings popover's update control.
+    pub(crate) update_state: updates::UpdateState,
     /// For the settings requests, which run outside the store runtimes.
     api: interval_desktop_core::api_client::ApiClient,
     /// Captured on the main thread, where main's runtime guard is active; requests
     /// must run on the tokio runtime (reqwest needs its reactor).
-    tokio: tokio::runtime::Handle,
+    pub(crate) tokio: tokio::runtime::Handle,
     focus_handle: gpui::FocusHandle,
 }
 
@@ -160,7 +163,7 @@ impl IntervalApp {
         });
 
         let settings = views::SettingsUi::new(cx);
-        let this = Self {
+        let mut this = Self {
             store,
             selector,
             mono_font,
@@ -173,11 +176,15 @@ impl IntervalApp {
             map_animation: None,
             map_last_snapshot: None,
             settings,
+            update_state: updates::UpdateState::Idle,
             api,
             tokio: tokio::runtime::Handle::current(),
             focus_handle,
         };
         this.refresh_settings(cx);
+        if interval_desktop_core::update::current_version().is_some() {
+            this.check_for_updates(cx);
+        }
         this
     }
 
@@ -581,6 +588,7 @@ fn main() {
     // Everything here happens before the tokio runtime exists: env mutation needs a
     // single-threaded process, and the chdir must precede any backend code (dotenv,
     // sqlite, curated tracks, FastF1 scripts are all cwd-relative).
+    interval_desktop_core::update::sweep_backups();
     let data_dir = embed::data_dir().expect("failed to resolve data directory");
     embed::prepare_data_dir(&data_dir).expect("failed to prepare data directory");
     std::env::set_current_dir(&data_dir).expect("failed to enter data directory");

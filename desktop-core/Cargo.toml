@@ -11,10 +11,13 @@ license.workspace = true
 interval-backend = { path = "../backend" }
 
 chrono = { version = "0.4", features = ["serde"] }
+flate2 = "1"
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots", "stream"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tar = "0.4"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }

@@ -23,4 +23,5 @@ pub mod store;
 pub mod timing_display;
 pub mod track_geometry;
 pub mod track_map_view;
+pub mod update;
 pub mod weather_display;
