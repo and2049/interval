@@ -2618,3 +2618,204 @@ fn sse_payloads(text: &str, event_name: &str) -> Vec<Value> {
 
 // --- settings routes -------------------------------------------------------------
 //
+// These routes read and write an API credential on a service with no authentication,
+// so the tests below pin down both halves of the contract: that they do not exist
+// unless the desktop shell asks for them, and that no response ever contains the token.
+
+fn settings_test_store() -> (crate::settings::SettingsStore, std::path::PathBuf) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "interval-settings-route-{}-{unique}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    (crate::settings::SettingsStore::at(path.clone()), path)
+}
+
+async fn settings_app(path: &std::path::Path) -> Router {
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
+        crate::connectors::openf1_live::OpenF1LiveConfig {
+            enabled: true,
+            // Unreachable on purpose: probes must fail fast without leaving the machine.
+            base_url: "http://127.0.0.1:9/v1/".parse().unwrap(),
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
+            auth_header: "authorization".to_string(),
+        },
+    );
+    let state = AppState::new_with_live(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+        live_client,
+    )
+    .with_settings(crate::settings::SettingsStore::at(path.to_path_buf()));
+    router(state.clone()).merge(settings_router(state))
+}
+
+async fn send(app: Router, method: &str, uri: &str, body: Option<&str>) -> (HttpStatusCode, String) {
+    let request = Request::builder().method(method).uri(uri);
+    let request = match body {
+        Some(json) => request
+            .header("content-type", "application/json")
+            .body(Body::from(json.to_string()))
+            .unwrap(),
+        None => request.body(Body::empty()).unwrap(),
+    };
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+#[tokio::test]
+async fn settings_routes_are_absent_unless_they_are_registered() {
+    // The exact shape of the public web deployment, which never sets the gate flag.
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let app = router(AppState::new(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+    ));
+
+    let (status, _) = send(app.clone(), "GET", "/api/settings/openf1-login", None).await;
+    assert_eq!(status, HttpStatusCode::NOT_FOUND);
+
+    let (status, _) = send(
+        app,
+        "PUT",
+        "/api/settings/openf1-login",
+        Some(r#"{"username":"me@example.com","password":"whatever"}"#),
+    )
+    .await;
+    assert_eq!(status, HttpStatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn settings_report_no_login_on_a_fresh_install() {
+    let (_store, path) = settings_test_store();
+    let app = settings_app(&path).await;
+
+    let (status, body) = send(app, "GET", "/api/settings/openf1-login", None).await;
+    assert_eq!(status, HttpStatusCode::OK);
+    let payload = serde_json::from_str::<Value>(&body).unwrap();
+    assert_eq!(payload["configured"], false);
+    assert!(payload["username"].is_null());
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn saving_a_login_never_returns_the_password() {
+    let (_store, path) = settings_test_store();
+    let secret = "supersecretpassword123";
+
+    let put_body = format!(r#"{{"username":"me@example.com","password":"{secret}"}}"#);
+    let (status, saved) = send(
+        settings_app(&path).await,
+        "PUT",
+        "/api/settings/openf1-login",
+        Some(&put_body),
+    )
+    .await;
+    assert_eq!(status, HttpStatusCode::OK);
+
+    let (_, fetched) = send(
+        settings_app(&path).await,
+        "GET",
+        "/api/settings/openf1-login",
+        None,
+    )
+    .await;
+
+    // Assert on the raw bytes, not the parsed value: a future field must not be able to
+    // reintroduce a leak without failing this test.
+    for body in [&saved, &fetched] {
+        assert!(!body.contains(secret), "password leaked in response: {body}");
+    }
+
+    let payload = serde_json::from_str::<Value>(&fetched).unwrap();
+    assert_eq!(payload["configured"], true);
+    assert_eq!(payload["source"], "settings");
+    assert_eq!(payload["username"], "me@example.com");
+
+    // ...but it must really be on disk, otherwise the masking test above is vacuous.
+    assert!(std::fs::read_to_string(&path).unwrap().contains(secret));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn clearing_a_login_falls_back_to_no_configuration() {
+    let (_store, path) = settings_test_store();
+    let app_put = settings_app(&path).await;
+    send(
+        app_put,
+        "PUT",
+        "/api/settings/openf1-login",
+        Some(r#"{"username":"me@example.com","password":"a-password"}"#),
+    )
+    .await;
+
+    let (status, body) = send(
+        settings_app(&path).await,
+        "DELETE",
+        "/api/settings/openf1-login",
+        None,
+    )
+    .await;
+    assert_eq!(status, HttpStatusCode::OK);
+    let payload = serde_json::from_str::<Value>(&body).unwrap();
+    assert_eq!(payload["configured"], false);
+    assert_eq!(payload["source"], "none");
+    assert!(payload["username"].is_null());
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn blank_logins_are_rejected() {
+    let (_store, path) = settings_test_store();
+
+    for (body, field) in [
+        (r#"{"username":"   ","password":"pw"}"#, "username"),
+        (r#"{"username":"me@example.com","password":"   "}"#, "password"),
+    ] {
+        let (status, response) = send(
+            settings_app(&path).await,
+            "PUT",
+            "/api/settings/openf1-login",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::BAD_REQUEST);
+        let payload = serde_json::from_str::<Value>(&response).unwrap();
+        assert!(payload["error"]
+            .as_str()
+            .is_some_and(|message| message.contains(field) && message.contains("blank")));
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn testing_an_unreachable_api_reports_unreachable_with_status_ok() {
+    let (_store, path) = settings_test_store();
+
+    let (status, body) = send(
+        settings_app(&path).await,
+        "POST",
+        "/api/settings/openf1-login/test",
+        None,
+    )
+    .await;
+
+    // A failed probe is a successful diagnosis, so the HTTP status stays 200.
+    assert_eq!(status, HttpStatusCode::OK);
+    let payload = serde_json::from_str::<Value>(&body).unwrap();
+    assert_eq!(payload["result"], "unreachable");
+
+    let _ = std::fs::remove_file(&path);
+}
