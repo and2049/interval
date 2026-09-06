@@ -1,0 +1,87 @@
+# Trigger: a push to the `latest` branch (i.e. merging `dev` into `latest`).
+# The version tag is derived from the calendar date as `vYY-M-D.N`, where N is
+# the same-day index that lets multiple merges in one day each get their own
+# tag. The draft release reserves the tag; publishing the draft creates it.
+name: release
+
+on:
+  push:
+    branches:
+      - latest
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v26-9-6.0)"
+        required: false
+        type: string
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.tag }}
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Determine version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            # GitHub runners are UTC; %-m/%-d drop leading zeros to match vYY-M-D.
+            PREFIX="v$(date -u +%y)-$(date -u +%-m)-$(date -u +%-d)"
+            # Existing releases (drafts included) fix the same-day index N so
+            # repeated merges into `latest` never reuse a tag.
+            EXISTING=$(gh release list --limit 200 --json tagName \
+              --jq ".[].tagName | select(startswith(\"${PREFIX}.\"))" || true)
+            N=0
+            for t in $EXISTING; do
+              n="${t##*.}"
+              if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge "$N" ]; then
+                N=$((n + 1))
+              fi
+            done
+            TAG="${PREFIX}.${N}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: ${VERSION} (tag: ${TAG})"
+
+  build:
+    needs: version
+    uses: ./.github/workflows/desktop-gpui.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: interval-desktop-*
+          path: dist
+          merge-multiple: true
+
+      # Draft: the release is reviewed and published by hand.
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ needs.version.outputs.tag }}
+          draft: true
+          generate_release_notes: true
+          files: dist/*

@@ -5,6 +5,13 @@ on:
     branches: [main, dev]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version stamped into the binaries and archive names (empty = dev)"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   build:
@@ -15,13 +22,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: interval-desktop-linux
+            target: linux-x64
             binary: interval-desktop
           - os: windows-latest
-            artifact: interval-desktop-windows
+            target: windows-x64
             binary: interval-desktop.exe
           - os: macos-latest
-            artifact: interval-desktop-macos
+            target: macos-arm64
             binary: interval-desktop
 
     steps:
@@ -42,6 +49,8 @@ jobs:
 
       - name: Build
         run: cargo build --release -p interval-desktop
+        env:
+          INTERVAL_VERSION: ${{ inputs.version }}
 
       # gpui_platform's backends are all feature-gated with default = [], so a wrong
       # feature list still compiles cleanly into a binary that cannot open a window.
@@ -50,7 +59,22 @@ jobs:
         if: runner.os == 'Linux'
         run: ldd target/release/interval-desktop | grep -q libxkbcommon
 
+      # Archived on the build runner because upload-artifact drops the executable bit.
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          NAME="interval-desktop-${VERSION:-dev}-${{ matrix.target }}"
+          mkdir -p dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "dist/${NAME}.zip" "./target/release/${{ matrix.binary }}" > /dev/null
+          else
+            tar -C target/release -czf "dist/${NAME}.tar.gz" "${{ matrix.binary }}"
+          fi
+          ls -l dist
+
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: target/release/${{ matrix.binary }}
+          name: interval-desktop-${{ matrix.target }}
+          path: dist/*

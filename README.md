@@ -106,7 +106,33 @@ Build a release binary for the current platform:
 cargo build --release -p interval-desktop
 ```
 
-The binary is `target/release/interval-desktop` (`.exe` on Windows). Each platform must be built on itself; the Rust backend and GPUI backends cannot be cross-compiled between them. `.github/workflows/desktop-gpui.yml` builds all three on GitHub Actions runners and uploads the raw binaries as artifacts. (Installer/packaging metadata is a later task; the app currently ships as a bare binary.)
+The binary is `target/release/interval-desktop` (`.exe` on Windows). Each platform must be built on itself; the Rust backend and GPUI backends cannot be cross-compiled between them. `.github/workflows/desktop-gpui.yml` builds all three on GitHub Actions runners and uploads one archive per platform as artifacts (`dev` in place of the version). (Installer/packaging metadata is a later task; the app currently ships as a bare binary.)
+
+### Releases
+
+Releases are GitHub draft releases with one archive per platform, built by `.github/workflows/release.yml`. To cut one, merge `dev` into `latest` and push:
+
+```bash
+git checkout latest
+git merge --ff-only dev
+git push origin latest
+```
+
+The push triggers the `release` workflow, which:
+
+1. Derives the tag `vYY-M-D.N` from the UTC date. `N` is the same-day index: the first release of the day is `.0`, and existing releases (drafts included) bump it so repeated merges never reuse a tag.
+2. Runs the `desktop-gpui` build workflow with that version on all three runners, so a release build is the same job CI already exercised on `dev`.
+3. Creates a **draft** release named after the tag with auto-generated notes and the archives attached. Review it on GitHub and publish by hand; publishing creates the git tag.
+
+To re-run for an explicit tag (e.g. after deleting a failed draft), use `workflow_dispatch` on the `release` workflow with the `tag` input set.
+
+| Runner | Archive |
+| --- | --- |
+| `windows-latest` | `interval-desktop-<version>-windows-x64.zip` |
+| `macos-latest` | `interval-desktop-<version>-macos-arm64.tar.gz` |
+| `ubuntu-latest` | `interval-desktop-<version>-linux-x64.tar.gz` |
+
+Archives are created on the build runner rather than in the release job because `upload-artifact` drops the executable bit. The workflow passes `INTERVAL_VERSION` to `cargo build`; `desktop-gpui/build.rs` stamps it into the Windows `VERSIONINFO` resource and falls back to the crate version when unset. `Cargo.toml` versions are not bumped per release; the date tag is the release identifier.
 
 At runtime the app enters a per-user data directory before starting the backend, which resolves every path it touches (`.env`, `interval.db`, `backend/assets/tracks`, `scripts/`, `cache/`) relative to that directory. It is `<app-data>/interval/data`:
 

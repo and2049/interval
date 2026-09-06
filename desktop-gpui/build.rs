@@ -5,6 +5,9 @@
 //!    — there is no runtime icon API (`WindowOptions::icon` is X11-only). Deliberately
 //!    does NOT embed an RT_MANIFEST: gpui's default `windows-manifest` feature already
 //!    embeds one, and a second copy is a duplicate-resource link error.
+//!    The VERSIONINFO block takes `INTERVAL_VERSION` when set (the release workflow passes
+//!    the date-based `YY-M-D.N` release version, see the Releases section of `README.md`) and falls back to
+//!    the crate version.
 //!
 //! 2. Downloads and embeds a pinned `uv` binary for the build target, so FastF1 ingest
 //!    needs no Python on the user's machine: at runtime uv provisions a managed CPython
@@ -169,9 +172,13 @@ fn windows_resources() {
         .trim_start_matches(r"\\?\")
         .replace('\\', "\\\\");
 
-    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    println!("cargo:rerun-if-env-changed=INTERVAL_VERSION");
+    let pkg_version = std::env::var("INTERVAL_VERSION")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap_or_default());
     let mut parts = pkg_version
-        .split('.')
+        .split(['.', '-'])
         .map(|part| part.parse::<u16>().unwrap_or(0))
         .chain(std::iter::repeat(0));
     let file_version = format!(
