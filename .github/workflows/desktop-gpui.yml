@@ -1,0 +1,87 @@
+name: desktop-gpui
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version stamped into the binaries and archive names (empty = dev)"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            binary: interval-desktop
+          - os: windows-latest
+            target: windows-x64
+            binary: interval-desktop.exe
+          - os: macos-latest
+            target: macos-arm64
+            binary: interval-desktop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel; this action just ensures rustup honors it.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev
+
+      # - name: Test Linux installer
+      #   if: runner.os == 'Linux'
+      #   run: bash scripts/test-linux-install.sh
+
+      - name: Test core crates
+        run: cargo test -p interval-backend -p interval-desktop-core
+
+      - name: Build
+        run: cargo build --release -p interval-desktop
+        env:
+          INTERVAL_VERSION: ${{ inputs.version }}
+
+      # gpui_platform's backends are all feature-gated with default = [], so a wrong
+      # feature list still compiles cleanly into a binary that cannot open a window.
+      # Linking libxkbcommon proves the wayland/x11 backends are actually present.
+      - name: Assert the Linux GUI backend is linked
+        if: runner.os == 'Linux'
+        run: ldd target/release/interval-desktop | grep -q libxkbcommon
+
+      # Archived on the build runner because upload-artifact drops the executable bit.
+      # Names carry no version so `releases/latest/download/<name>` resolves for the installers.
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="interval-desktop-${{ matrix.target }}"
+          mkdir -p dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "dist/${NAME}.zip" "./target/release/${{ matrix.binary }}" > /dev/null
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            tar -czf "dist/${NAME}.tar.gz" -C target/release "${{ matrix.binary }}" \
+              -C "$GITHUB_WORKSPACE" desktop-gpui/packaging desktop-gpui/app-icon
+          else
+            tar -C target/release -czf "dist/${NAME}.tar.gz" "${{ matrix.binary }}"
+          fi
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: interval-desktop-${{ matrix.target }}
+          path: dist/*
