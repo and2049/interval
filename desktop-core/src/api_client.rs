@@ -10,7 +10,7 @@ use interval_backend::domain::{
     ReplayMetadata, ReplaySnapshot, Season, SessionReadiness, TrackGeometry,
 };
 
-use crate::settings_panel::{OpenF1TokenProbe, OpenF1TokenSettings};
+use crate::settings_panel::{OpenF1LoginProbe, OpenF1LoginSettings};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -218,27 +218,31 @@ impl ApiClient {
     // Settings routes exist only when the embedded server enables them; in other
     // deployments they 404, which is how the UI decides not to show the gear.
 
-    pub async fn openf1_token(&self) -> Result<OpenF1TokenSettings, ApiError> {
-        self.get_json(OPENF1_TOKEN_PATH).await
+    pub async fn openf1_login(&self) -> Result<OpenF1LoginSettings, ApiError> {
+        self.get_json(OPENF1_LOGIN_PATH).await
     }
 
-    pub async fn save_openf1_token(&self, token: &str) -> Result<OpenF1TokenSettings, ApiError> {
+    pub async fn save_openf1_login(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<OpenF1LoginSettings, ApiError> {
         let response = self
             .http
-            .put(self.url(OPENF1_TOKEN_PATH))
-            .json(&serde_json::json!({ "token": token }))
+            .put(self.url(OPENF1_LOGIN_PATH))
+            .json(&serde_json::json!({ "username": username, "password": password }))
             .send()
             .await?;
         decode_json(response).await
     }
 
-    pub async fn clear_openf1_token(&self) -> Result<OpenF1TokenSettings, ApiError> {
-        let response = self.http.delete(self.url(OPENF1_TOKEN_PATH)).send().await?;
+    pub async fn clear_openf1_login(&self) -> Result<OpenF1LoginSettings, ApiError> {
+        let response = self.http.delete(self.url(OPENF1_LOGIN_PATH)).send().await?;
         decode_json(response).await
     }
 
-    pub async fn test_openf1_token(&self) -> Result<OpenF1TokenProbe, ApiError> {
-        self.post_json(&format!("{OPENF1_TOKEN_PATH}/test")).await
+    pub async fn test_openf1_login(&self) -> Result<OpenF1LoginProbe, ApiError> {
+        self.post_json(&format!("{OPENF1_LOGIN_PATH}/test")).await
     }
 
     /// Open one of the `*_url` endpoints as a byte stream for [`crate::sse::SseParser`].
@@ -255,7 +259,7 @@ impl ApiClient {
     }
 }
 
-const OPENF1_TOKEN_PATH: &str = "/api/settings/openf1-token";
+const OPENF1_LOGIN_PATH: &str = "/api/settings/openf1-login";
 
 async fn decode_json<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,

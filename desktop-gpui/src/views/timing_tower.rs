@@ -36,9 +36,12 @@ fn cell(width: f32) -> gpui::Div {
         .overflow_hidden()
 }
 
-/// `dimmed` — the driver is hidden by the transport-bar filter: every color collapses
-/// to the faint grey so the row recedes without losing its slot.
-fn timing_row(ix: usize, row: &DriverSnapshot, dimmed: bool) -> impl IntoElement + use<> {
+/// `hidden_by_filter` — the driver is hidden by the transport-bar filter. That, or a
+/// driver who is out of the race, collapses every color to the faint grey so the row
+/// recedes without losing its slot.
+fn timing_row(ix: usize, row: &DriverSnapshot, hidden_by_filter: bool) -> impl IntoElement + use<> {
+    let dimmed = timing_display::row_is_dimmed(row, hidden_by_filter);
+    let (gap, interval) = timing_display::gap_and_interval_labels(row);
     let paint = move |color: Hsla| if dimmed { ui::faint() } else { color };
     let compound_tone = paint(ui::tone_color(formatters::compound_class(&row.compound)));
     div()
@@ -74,20 +77,20 @@ fn timing_row(ix: usize, row: &DriverSnapshot, dimmed: bool) -> impl IntoElement
                 .child(row.driver.code.clone()),
         )
         .child(
-            cell(COLUMNS[2]).text_color(paint(theme::TIMING())).child(
-                timing_display::gap_label(row.position, row.gap_to_leader.as_deref()).to_string(),
-            ),
+            cell(COLUMNS[2])
+                .text_color(paint(theme::TIMING()))
+                .child(gap.to_string()),
         )
         .child(
             cell(COLUMNS[3])
                 .text_color(paint(
-                    if timing_display::interval_within_one_second(row.interval.as_deref()) {
+                    if !dimmed && timing_display::interval_within_one_second(Some(interval)) {
                         DRS_LIME()
                     } else {
                         theme::TIMING()
                     },
                 ))
-                .child(timing_display::interval_label(row.interval.as_deref()).to_string()),
+                .child(interval.to_string()),
         )
         .children(
             timing_display::sector_cells(&row.sectors)

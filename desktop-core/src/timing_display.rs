@@ -1,6 +1,6 @@
 //! Port of `frontend/src/lib/timingDisplay.ts`.
 
-use interval_backend::domain::{DriverSnapshot, Sector};
+use interval_backend::domain::{DriverSnapshot, DriverStatus, Sector};
 
 const SECTOR_COUNT: usize = 3;
 
@@ -23,6 +23,24 @@ pub fn interval_label(interval: Option<&str>) -> &str {
     interval.unwrap_or("--")
 }
 
+/// The GAP and INT cells for a row. A driver who is out shows `OUT` and no interval:
+/// OpenF1 keeps publishing a stale gap for a retired car for a while.
+pub fn gap_and_interval_labels(row: &DriverSnapshot) -> (&str, &str) {
+    if row.status == DriverStatus::Out {
+        return ("OUT", "--");
+    }
+    (
+        gap_label(row.position, row.gap_to_leader.as_deref()),
+        interval_label(row.interval.as_deref()),
+    )
+}
+
+/// True when the row should be drawn in the faint grey: hidden by the driver filter,
+/// or out of the race.
+pub fn row_is_dimmed(row: &DriverSnapshot, hidden_by_filter: bool) -> bool {
+    hidden_by_filter || row.status == DriverStatus::Out
+}
+
 /// True when the interval to the car ahead is under a second — the DRS-range highlight.
 /// Non-numeric intervals ("--", "1 LAP") never qualify.
 pub fn interval_within_one_second(interval: Option<&str>) -> bool {
@@ -43,6 +61,23 @@ mod tests {
             duration: Some(duration),
             status: SectorStatus::Normal,
         }
+    }
+
+    #[test]
+    fn out_rows_show_out_and_are_dimmed() {
+        use interval_backend::domain::DriverStatus;
+        let mut row = row();
+        row.position = 12;
+        row.status = DriverStatus::Out;
+        row.gap_to_leader = Some("+1 LAP".to_string());
+        row.interval = Some("+1 LAP".to_string());
+        assert_eq!(gap_and_interval_labels(&row), ("OUT", "--"));
+        assert!(row_is_dimmed(&row, false));
+
+        row.status = DriverStatus::OnTrack;
+        assert_eq!(gap_and_interval_labels(&row), ("+1 LAP", "+1 LAP"));
+        assert!(!row_is_dimmed(&row, false));
+        assert!(row_is_dimmed(&row, true));
     }
 
     #[test]

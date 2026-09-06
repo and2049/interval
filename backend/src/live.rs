@@ -1,7 +1,9 @@
 use crate::{
     connectors::{
         openf1_historical::RawEndpoint,
-        openf1_live::{live_endpoint_cadence_seconds, OpenF1LiveClient, OpenF1LiveError},
+        openf1_live::{
+            live_endpoint_cadence_seconds, OpenF1Auth, OpenF1LiveClient, OpenF1LiveError,
+        },
     },
     domain::{
         DataSource, EndpointLinks, LiveAvailability, LiveChannelHealth, LiveChannelState,
@@ -25,10 +27,19 @@ use std::{
 use tokio::sync::Mutex;
 
 const LIVE_FRAME_STEP_SECONDS: f64 = 0.5;
-// OpenF1's live feed lags real time by a few seconds and delivers rows in
-// bursts. Running the cursor this far behind wall clock keeps it inside data
-// that has already arrived, so location interpolation stays smooth.
-const LIVE_DISPLAY_DELAY_SECONDS: f64 = 8.0;
+// OpenF1's live feed lags real time by a few seconds (measured ~2.6 s at Monza 2026)
+// and we only poll location every few seconds, so the newest sample on hand can be
+// up to (upstream lag + location cadence + request time) old. The cursor runs behind
+// wall clock by that much plus a margin, so it always has real samples on both sides
+// to interpolate between. Too short a delay makes the cursor catch up with the data
+// horizon, freeze there until the next poll lands, then jump: the cars stutter.
+const LIVE_UPSTREAM_LAG_ALLOWANCE_SECONDS: f64 = 8.0;
+
+/// Location poll cadence plus the upstream allowance. Derived, not fixed, so a change
+/// to the polling budget cannot silently reintroduce the stutter.
+fn live_display_delay_seconds() -> f64 {
+    live_endpoint_cadence_seconds("location") + LIVE_UPSTREAM_LAG_ALLOWANCE_SECONDS
+}
 const LIVE_WINDOW_PADDING_MINUTES: i64 = 30;
 const LIVE_QUIET_SHUTDOWN_MINUTES: i64 = 10;
 const LIVE_INCREMENTAL_ROW_OVERLAP_SECONDS: i64 = 5;
@@ -75,13 +86,13 @@ impl OpenF1LiveRegistry {
         }
     }
 
-    /// Applies a new OpenF1 token to the shared client.
+    /// Applies new OpenF1 credentials to the shared client.
     ///
     /// A running live session is deliberately left alone: the client's config is shared,
-    /// so the session's next poll uses the new token on its own. Tearing the session down
+    /// so the session's next poll uses the new login on its own. Tearing the session down
     /// would take the user's race off the screen for no benefit.
-    pub async fn apply_openf1_token(&self, token: Option<String>) {
-        self.client.set_token(token).await;
+    pub async fn apply_openf1_auth(&self, auth: OpenF1Auth) {
+        self.client.set_auth(auth).await;
     }
 
     pub async fn probe_openf1(&self) -> Result<(), OpenF1LiveError> {
@@ -386,11 +397,12 @@ impl OpenF1LiveRegistry {
         previous_bundle: Option<Vec<LiveCachedEndpoint>>,
     ) -> anyhow::Result<Vec<LiveCachedEndpoint>> {
         if previous_bundle.is_none() {
-            let endpoint_fetches = self.client.endpoint_specs().iter().map(|spec| {
+            let specs = self.client.endpoint_specs();
+            let endpoint_fetches = specs.iter().map(|spec| {
                 let client = self.client.clone();
                 async move {
                     let fetched = client
-                        .fetch_live_bundle_endpoint(session_key, spec.name)
+                        .fetch_initial_live_bundle_endpoint(session_key, spec)
                         .await;
                     let fetched_at = Utc::now();
                     match fetched {
@@ -424,7 +436,8 @@ impl OpenF1LiveRegistry {
             .into_iter()
             .map(|endpoint| (endpoint.raw.endpoint.clone(), endpoint))
             .collect();
-        let endpoint_fetches = self.client.endpoint_specs().iter().map(|spec| {
+        let specs = self.client.endpoint_specs();
+        let endpoint_fetches = specs.iter().map(|spec| {
             let client = self.client.clone();
             let previous = previous_by_endpoint.remove(spec.name);
             let is_fresh = previous.as_ref().is_some_and(|endpoint| {
@@ -448,7 +461,7 @@ impl OpenF1LiveRegistry {
                     }
                     None => {
                         client
-                            .fetch_live_bundle_endpoint(session_key, spec.name)
+                            .fetch_initial_live_bundle_endpoint(session_key, spec)
                             .await
                     }
                 };
@@ -838,7 +851,7 @@ fn live_snapshot_time_bounds(
     let max_t = session_duration(session)
         .unwrap_or(now_t + LIVE_FRAME_STEP_SECONDS)
         .max(now_t);
-    let target_t = now_t - LIVE_DISPLAY_DELAY_SECONDS;
+    let target_t = now_t - live_display_delay_seconds();
     let snapshot_t = latest_location_t
         .map_or(target_t, |data_t| data_t.min(target_t))
         .max(0.0)
@@ -1006,7 +1019,9 @@ mod tests {
                 session_key: 1,
                 payload: serde_json::json!([{ "air_temperature": 22.0 }]),
             },
-            fetched_at: now - ChronoDuration::seconds(45),
+            // Weather is polled once a minute, so it stays "cached" for three minutes
+            // before it counts as stale.
+            fetched_at: now - ChronoDuration::seconds(200),
             attempted_at: now,
             failure_count: 0,
             last_error: None,
@@ -1296,8 +1311,17 @@ mod tests {
 
         let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now, Some(1_797.0));
 
-        assert_eq!(snapshot_t, 1_800.0 - LIVE_DISPLAY_DELAY_SECONDS);
+        assert_eq!(snapshot_t, 1_800.0 - live_display_delay_seconds());
         assert_eq!(max_t, 7_200.0);
+    }
+
+    #[test]
+    fn live_display_delay_covers_a_full_location_poll_plus_upstream_lag() {
+        // Location polled every 5 s, OpenF1 itself ~3 s behind: without at least that
+        // much delay the cursor outruns the data and the map stutters.
+        let delay = live_display_delay_seconds();
+        assert_eq!(delay, 5.0 + LIVE_UPSTREAM_LAG_ALLOWANCE_SECONDS);
+        assert!(delay >= live_endpoint_cadence_seconds("location") + 5.0);
     }
 
     #[test]
@@ -1322,7 +1346,7 @@ mod tests {
         let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now, None);
 
         assert_eq!(max_t, 8_400.0);
-        assert_eq!(snapshot_t, 8_400.0 - LIVE_DISPLAY_DELAY_SECONDS);
+        assert_eq!(snapshot_t, 8_400.0 - live_display_delay_seconds());
     }
 
     #[test]
@@ -1334,7 +1358,7 @@ mod tests {
 
         let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now, None);
 
-        assert_eq!(snapshot_t, 3_600.0 - LIVE_DISPLAY_DELAY_SECONDS);
+        assert_eq!(snapshot_t, 3_600.0 - live_display_delay_seconds());
         assert_eq!(max_t, 10_800.0);
     }
 
@@ -1347,7 +1371,7 @@ mod tests {
 
         let (snapshot_t, max_t) = live_snapshot_time_bounds(&session, now, None);
 
-        assert_eq!(snapshot_t, 3_600.0 - LIVE_DISPLAY_DELAY_SECONDS);
+        assert_eq!(snapshot_t, 3_600.0 - live_display_delay_seconds());
         assert_eq!(max_t, 10_800.0);
         assert!(!live_session_window_closed(&session, &[], now));
     }

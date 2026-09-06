@@ -202,6 +202,8 @@ fn live_start_error(error: anyhow::Error) -> ApiError {
     } else if message.contains("OpenF1 live request failed")
         || message.contains("OpenF1 live configuration error")
         || message.contains("invalid OpenF1 live auth header")
+        || message.contains("OpenF1 rejected the credentials")
+        || message.contains("OpenF1 token endpoint")
     {
         ApiError::BadGateway(message)
     } else {

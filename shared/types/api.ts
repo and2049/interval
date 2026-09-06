@@ -332,21 +332,21 @@ export interface IngestResponse {
   error: string | null;
 }
 
-export type OpenF1TokenSource = "settings" | "env" | "none";
+export type OpenF1AuthSource = "settings" | "env" | "none";
 
-export interface OpenF1TokenSettings {
+export interface OpenF1LoginSettings {
   configured: boolean;
-  /** Masked fingerprint of the stored token. Never the token itself. */
-  hint: string | null;
-  source: OpenF1TokenSource;
+  /** The saved account's username. The password is never returned. */
+  username: string | null;
+  source: OpenF1AuthSource;
   /** True when INTERVAL_OPENF1_LIVE_TOKEN is also set. */
   env_token_present: boolean;
   path: string | null;
 }
 
-export type OpenF1TokenProbeResult = "ok" | "unauthorized" | "unreachable" | "invalid";
+export type OpenF1LoginProbeResult = "ok" | "unauthorized" | "unreachable" | "invalid";
 
-export interface OpenF1TokenProbe {
-  result: OpenF1TokenProbeResult;
+export interface OpenF1LoginProbe {
+  result: OpenF1LoginProbeResult;
   message: string;
 }

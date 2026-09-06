@@ -552,7 +552,7 @@ async fn live_current_reports_error_when_openf1_discovery_fails() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: "http://127.0.0.1:9/v1/".parse().unwrap(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -579,7 +579,7 @@ async fn live_start_reports_bad_gateway_when_openf1_discovery_fails() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: "http://127.0.0.1:9/v1/".parse().unwrap(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -616,7 +616,7 @@ async fn live_current_reports_configuration_errors() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: "https://api.openf1.org/v1/".parse().unwrap(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
         "INTERVAL_OPENF1_LIVE_BASE_URL is invalid",
@@ -645,7 +645,7 @@ async fn live_start_reports_bad_gateway_when_openf1_live_is_misconfigured() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: "https://api.openf1.org/v1/".parse().unwrap(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
         "INTERVAL_OPENF1_LIVE_BASE_URL is invalid",
@@ -684,7 +684,7 @@ async fn live_start_reports_bad_gateway_when_openf1_live_auth_header_is_invalid(
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: Some("token".to_string()),
+            auth: crate::connectors::openf1_live::OpenF1Auth::Token("token".to_string()),
             auth_header: "bad header".to_string(),
         },
     );
@@ -730,7 +730,7 @@ async fn live_current_is_inactive_when_session_window_is_future() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -766,7 +766,7 @@ async fn live_current_is_inactive_during_pre_session_padding() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -801,7 +801,7 @@ async fn live_current_detects_active_sprint_sessions() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -856,7 +856,7 @@ async fn openf1_live_current_start_snapshot_and_geometry_use_mocked_live_rows() 
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -955,7 +955,7 @@ async fn openf1_live_current_returns_running_session_when_discovery_later_fails(
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1007,7 +1007,7 @@ async fn openf1_live_post_session_padding_keeps_snapshot_clock_advancing() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1079,7 +1079,7 @@ async fn openf1_live_start_rejects_stored_session_that_is_not_active() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1120,7 +1120,7 @@ async fn openf1_live_degrades_when_optional_channels_are_missing() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1169,7 +1169,7 @@ async fn openf1_live_reports_initial_endpoint_failures_in_channel_health() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1221,7 +1221,7 @@ async fn openf1_live_keeps_last_snapshot_when_refresh_endpoint_fails() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1284,7 +1284,7 @@ async fn openf1_live_survives_malformed_rows_in_refresh_payload() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1342,7 +1342,7 @@ async fn openf1_live_start_rejects_empty_initial_race_state() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1377,7 +1377,7 @@ async fn openf1_live_start_reports_bad_gateway_when_required_initial_endpoint_fa
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1418,7 +1418,7 @@ async fn openf1_live_start_rejects_initial_state_without_timing_data() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1475,7 +1475,7 @@ async fn openf1_live_reuses_cached_matching_track_geometry() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1524,7 +1524,7 @@ async fn openf1_live_events_endpoint_returns_current_live_timeline() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1568,7 +1568,7 @@ async fn openf1_live_stream_replays_current_events_for_reconnect_recovery() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1629,7 +1629,7 @@ async fn concurrent_live_snapshot_readers_share_one_upstream_refresh() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1645,7 +1645,9 @@ async fn concurrent_live_snapshot_readers_share_one_upstream_refresh() {
         StatusCode::OK,
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+    // Past the position cadence (6 s, scaled to 0.6 s in test builds), so the snapshot
+    // reads below are due a refresh.
+    tokio::time::sleep(std::time::Duration::from_millis(1_050)).await;
     let before = live_mock.call_counts();
 
     let path = format!("/api/sessions/{key}/live/snapshot");
@@ -1674,7 +1676,7 @@ async fn stopping_during_refresh_does_not_resurrect_live_session() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1730,7 +1732,7 @@ async fn openf1_live_stream_emits_late_arriving_event_rows_once() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -1770,7 +1772,7 @@ async fn openf1_live_stream_emits_end_when_session_stops() {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled: true,
             base_url: live_mock.base_url.clone(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -2016,7 +2018,7 @@ async fn seeded_router_with_live_enabled(enabled: bool) -> Router {
         crate::connectors::openf1_live::OpenF1LiveConfig {
             enabled,
             base_url: "http://127.0.0.1:9/v1/".parse().unwrap(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -2640,7 +2642,7 @@ async fn settings_app(path: &std::path::Path) -> Router {
             enabled: true,
             // Unreachable on purpose: probes must fail fast without leaving the machine.
             base_url: "http://127.0.0.1:9/v1/".parse().unwrap(),
-            token: None,
+            auth: crate::connectors::openf1_live::OpenF1Auth::None,
             auth_header: "authorization".to_string(),
         },
     );
@@ -2678,43 +2680,43 @@ async fn settings_routes_are_absent_unless_they_are_registered() {
         crate::connectors::openf1_historical::HistoricalClient::default(),
     ));
 
-    let (status, _) = send(app.clone(), "GET", "/api/settings/openf1-token", None).await;
+    let (status, _) = send(app.clone(), "GET", "/api/settings/openf1-login", None).await;
     assert_eq!(status, HttpStatusCode::NOT_FOUND);
 
     let (status, _) = send(
         app,
         "PUT",
-        "/api/settings/openf1-token",
-        Some(r#"{"token":"whatever"}"#),
+        "/api/settings/openf1-login",
+        Some(r#"{"username":"me@example.com","password":"whatever"}"#),
     )
     .await;
     assert_eq!(status, HttpStatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn settings_report_no_token_on_a_fresh_install() {
+async fn settings_report_no_login_on_a_fresh_install() {
     let (_store, path) = settings_test_store();
     let app = settings_app(&path).await;
 
-    let (status, body) = send(app, "GET", "/api/settings/openf1-token", None).await;
+    let (status, body) = send(app, "GET", "/api/settings/openf1-login", None).await;
     assert_eq!(status, HttpStatusCode::OK);
     let payload = serde_json::from_str::<Value>(&body).unwrap();
     assert_eq!(payload["configured"], false);
-    assert!(payload["hint"].is_null());
+    assert!(payload["username"].is_null());
 
     let _ = std::fs::remove_file(&path);
 }
 
 #[tokio::test]
-async fn saving_a_token_never_returns_it() {
+async fn saving_a_login_never_returns_the_password() {
     let (_store, path) = settings_test_store();
-    let secret = "supersecrettoken123";
+    let secret = "supersecretpassword123";
 
-    let put_body = format!(r#"{{"token":"{secret}"}}"#);
+    let put_body = format!(r#"{{"username":"me@example.com","password":"{secret}"}}"#);
     let (status, saved) = send(
         settings_app(&path).await,
         "PUT",
-        "/api/settings/openf1-token",
+        "/api/settings/openf1-login",
         Some(&put_body),
     )
     .await;
@@ -2723,7 +2725,7 @@ async fn saving_a_token_never_returns_it() {
     let (_, fetched) = send(
         settings_app(&path).await,
         "GET",
-        "/api/settings/openf1-token",
+        "/api/settings/openf1-login",
         None,
     )
     .await;
@@ -2731,13 +2733,13 @@ async fn saving_a_token_never_returns_it() {
     // Assert on the raw bytes, not the parsed value: a future field must not be able to
     // reintroduce a leak without failing this test.
     for body in [&saved, &fetched] {
-        assert!(!body.contains(secret), "token leaked in response: {body}");
+        assert!(!body.contains(secret), "password leaked in response: {body}");
     }
 
     let payload = serde_json::from_str::<Value>(&fetched).unwrap();
     assert_eq!(payload["configured"], true);
     assert_eq!(payload["source"], "settings");
-    assert_eq!(payload["hint"], "••••n123");
+    assert_eq!(payload["username"], "me@example.com");
 
     // ...but it must really be on disk, otherwise the masking test above is vacuous.
     assert!(std::fs::read_to_string(&path).unwrap().contains(secret));
@@ -2746,21 +2748,21 @@ async fn saving_a_token_never_returns_it() {
 }
 
 #[tokio::test]
-async fn clearing_a_token_falls_back_to_no_configuration() {
+async fn clearing_a_login_falls_back_to_no_configuration() {
     let (_store, path) = settings_test_store();
     let app_put = settings_app(&path).await;
     send(
         app_put,
         "PUT",
-        "/api/settings/openf1-token",
-        Some(r#"{"token":"a-token-value"}"#),
+        "/api/settings/openf1-login",
+        Some(r#"{"username":"me@example.com","password":"a-password"}"#),
     )
     .await;
 
     let (status, body) = send(
         settings_app(&path).await,
         "DELETE",
-        "/api/settings/openf1-token",
+        "/api/settings/openf1-login",
         None,
     )
     .await;
@@ -2768,43 +2770,32 @@ async fn clearing_a_token_falls_back_to_no_configuration() {
     let payload = serde_json::from_str::<Value>(&body).unwrap();
     assert_eq!(payload["configured"], false);
     assert_eq!(payload["source"], "none");
+    assert!(payload["username"].is_null());
 
     let _ = std::fs::remove_file(&path);
 }
 
 #[tokio::test]
-async fn blank_tokens_are_rejected() {
+async fn blank_logins_are_rejected() {
     let (_store, path) = settings_test_store();
 
-    let (status, body) = send(
-        settings_app(&path).await,
-        "PUT",
-        "/api/settings/openf1-token",
-        Some(r#"{"token":"   "}"#),
-    )
-    .await;
-    assert_eq!(status, HttpStatusCode::BAD_REQUEST);
-    let payload = serde_json::from_str::<Value>(&body).unwrap();
-    assert!(payload["error"]
-        .as_str()
-        .is_some_and(|message| message.contains("blank")));
-
-    let _ = std::fs::remove_file(&path);
-}
-
-#[tokio::test]
-async fn tokens_that_cannot_be_sent_as_a_header_are_rejected() {
-    let (_store, path) = settings_test_store();
-
-    let (status, body) = send(
-        settings_app(&path).await,
-        "PUT",
-        "/api/settings/openf1-token",
-        Some(r#"{"token":"bad\nvalue"}"#),
-    )
-    .await;
-    assert_eq!(status, HttpStatusCode::BAD_REQUEST);
-    assert!(body.contains("HTTP header"));
+    for (body, field) in [
+        (r#"{"username":"   ","password":"pw"}"#, "username"),
+        (r#"{"username":"me@example.com","password":"   "}"#, "password"),
+    ] {
+        let (status, response) = send(
+            settings_app(&path).await,
+            "PUT",
+            "/api/settings/openf1-login",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::BAD_REQUEST);
+        let payload = serde_json::from_str::<Value>(&response).unwrap();
+        assert!(payload["error"]
+            .as_str()
+            .is_some_and(|message| message.contains(field) && message.contains("blank")));
+    }
 
     let _ = std::fs::remove_file(&path);
 }
@@ -2816,7 +2807,7 @@ async fn testing_an_unreachable_api_reports_unreachable_with_status_ok() {
     let (status, body) = send(
         settings_app(&path).await,
         "POST",
-        "/api/settings/openf1-token/test",
+        "/api/settings/openf1-login/test",
         None,
     )
     .await;

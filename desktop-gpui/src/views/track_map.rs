@@ -161,7 +161,9 @@ pub fn track_map(
     } else {
         "FORM".to_string()
     };
-    let status_chip = format!("{:?}", snapshot.race_state.track_status).to_uppercase();
+    let (status_chip, status_tone) =
+        interval_desktop_core::replay_events::track_status_chip(&snapshot.race_state.track_status);
+    let status_color = ui::tone_color(status_tone);
     let mode_label = replay_quality::map_mode_label(Some(&snapshot.track.map_mode))
         .unwrap_or("MAP UNKNOWN");
     let mode_tone =
@@ -201,7 +203,7 @@ pub fn track_map(
                 .flex_row()
                 .gap_1()
                 .child(chip(lap_chip, theme::TEXT()))
-                .child(chip(status_chip, theme::TEXT()))
+                .child(chip(status_chip, status_color))
                 .child(chip(mode_label.to_string(), mode_tone)),
         )
         .into_any_element();

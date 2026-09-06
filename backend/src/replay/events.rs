@@ -1,3 +1,4 @@
+use super::track_status::{self, TrackStatusState};
 use crate::{
     domain::{EventKind, EventSeverity, EventSource, ReplayEvent},
     normalization::RaceData,
@@ -6,7 +7,15 @@ use crate::{
 pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
     let mut events = Vec::new();
     let source = event_source(data.source);
-    for event in &data.race_control {
+    // Track status is a fold over the history, so walk it in time order and emit one
+    // TrackStatus event per change rather than one per flagged row: OpenF1 flags every
+    // sector yellow and every blue flag, none of which is a track-status change.
+    let mut race_control: Vec<&_> = data.race_control.iter().collect();
+    race_control.sort_by(|a, b| a.t.total_cmp(&b.t));
+    let mut status = TrackStatusState::default();
+    let mut last_status = status.status();
+    for event in race_control {
+        let upper = event.message.to_ascii_uppercase();
         // Ids are content-derived so they stay stable across live refreshes
         // even when older rows get trimmed; SSE clients dedupe by id.
         events.push(ReplayEvent {
@@ -17,9 +26,9 @@ pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
             ),
             t: event.t,
             kind: EventKind::RaceControl,
-            severity: if event.flag.as_deref() == Some("red") {
+            severity: if event.flag.as_deref() == Some("red") || track_status::mentions_red_flag(&upper) {
                 EventSeverity::Critical
-            } else if event.flag.is_some() {
+            } else if event.flag.is_some() || event.category.eq_ignore_ascii_case("SafetyCar") {
                 EventSeverity::Warning
             } else {
                 EventSeverity::Info
@@ -29,17 +38,26 @@ pub fn generate_events(data: &RaceData) -> Vec<ReplayEvent> {
             source: source.clone(),
             payload: serde_json::to_value(event).unwrap_or(serde_json::Value::Null),
         });
-        if let Some(flag) = &event.flag {
+        status.apply(event);
+        let current = status.status();
+        if current != last_status {
             events.push(ReplayEvent {
-                id: format!("track-status-{:.3}-{flag}", event.t),
+                id: format!("track-status-{:.3}-{current}", event.t),
                 t: event.t,
                 kind: EventKind::TrackStatus,
-                severity: EventSeverity::Notice,
+                severity: if current == track_status::RED {
+                    EventSeverity::Critical
+                } else if current == track_status::GREEN {
+                    EventSeverity::Notice
+                } else {
+                    EventSeverity::Warning
+                },
                 driver_number: None,
-                message: event.flag.clone().unwrap_or_default(),
+                message: current.clone(),
                 source: source.clone(),
                 payload: serde_json::to_value(event).unwrap_or(serde_json::Value::Null),
             });
+            last_status = current;
         }
     }
     for pit in &data.pits {

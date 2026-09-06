@@ -7,6 +7,7 @@ pub(crate) mod indexed_data;
 mod ingest_summary;
 pub(crate) mod metadata_builder;
 pub(crate) mod snapshot_builder;
+pub(crate) mod track_status;
 pub mod streaming;
 pub(crate) mod track_geometry_builder;
 mod track_geometry_math;

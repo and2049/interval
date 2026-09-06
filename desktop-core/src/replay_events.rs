@@ -47,16 +47,20 @@ pub fn event_severity_class(severity: &EventSeverity) -> Tone {
     }
 }
 
-/// Human label for a normalized track-status flag — the FastF1 status codes the export
-/// script resolves (1 clear, 2 yellow, 4 safety car, 5 red, 6 VSC, 7 VSC ending).
+/// Human label for a normalized track status: the FastF1 codes the export script
+/// resolves (1 clear, 2 yellow, 4 safety car, 5 red, 6 VSC, 7 VSC ending) plus the
+/// states the backend derives from OpenF1's live steward messages.
 pub fn flag_label(flag: &str) -> Option<&'static str> {
     match flag {
         "green" => Some("TRACK CLEAR"),
         "yellow" => Some("YELLOW FLAG"),
+        "double_yellow" => Some("DOUBLE YELLOW"),
         "red" => Some("RED FLAG"),
         "safety_car" => Some("SAFETY CAR"),
+        "safety_car_ending" => Some("SAFETY CAR IN THIS LAP"),
         "virtual_safety_car" => Some("VIRTUAL SAFETY CAR"),
         "virtual_safety_car_ending" => Some("VSC ENDING"),
+        "chequered" => Some("CHEQUERED FLAG"),
         _ => None,
     }
 }
@@ -64,10 +68,23 @@ pub fn flag_label(flag: &str) -> Option<&'static str> {
 pub fn flag_tone(flag: &str) -> Tone {
     match flag {
         "green" => Tone::Emerald,
-        "yellow" | "safety_car" | "virtual_safety_car" | "virtual_safety_car_ending" => Tone::Amber,
+        "yellow"
+        | "double_yellow"
+        | "safety_car"
+        | "safety_car_ending"
+        | "virtual_safety_car"
+        | "virtual_safety_car_ending" => Tone::Amber,
         "red" => Tone::Danger,
         _ => Tone::Bright,
     }
+}
+
+/// The map's status chip: the readable label for a known status, else the raw value.
+pub fn track_status_chip(status: &str) -> (String, Tone) {
+    let label = flag_label(status)
+        .map(str::to_string)
+        .unwrap_or_else(|| status.replace('_', " ").to_ascii_uppercase());
+    (label, flag_tone(status))
 }
 
 /// Display line for a race-control entry. Track-status rows carry a machine message
@@ -198,6 +215,18 @@ mod tests {
             flag: flag.map(str::to_string),
             scope: None,
         }
+    }
+
+    #[test]
+    fn track_status_chip_labels_known_states_and_falls_back_to_the_raw_value() {
+        assert_eq!(
+            track_status_chip("virtual_safety_car"),
+            ("VIRTUAL SAFETY CAR".to_string(), Tone::Amber)
+        );
+        assert_eq!(track_status_chip("red"), ("RED FLAG".to_string(), Tone::Danger));
+        assert_eq!(track_status_chip("green"), ("TRACK CLEAR".to_string(), Tone::Emerald));
+        assert_eq!(track_status_chip("double_yellow"), ("DOUBLE YELLOW".to_string(), Tone::Amber));
+        assert_eq!(track_status_chip("some_new_state"), ("SOME NEW STATE".to_string(), Tone::Bright));
     }
 
     #[test]

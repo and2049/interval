@@ -94,7 +94,7 @@ pub struct IntervalApp {
     pub(crate) map_animation: Option<views::MapAnimation>,
     /// The last snapshot the map rendered, kept to seed the next tween.
     pub(crate) map_last_snapshot: Option<interval_backend::domain::ReplaySnapshot>,
-    /// The OpenF1 token popover's state.
+    /// The OpenF1 account popover's state.
     pub(crate) settings: views::SettingsUi,
     /// For the settings requests, which run outside the store runtimes.
     api: interval_desktop_core::api_client::ApiClient,
@@ -181,13 +181,13 @@ impl IntervalApp {
         this
     }
 
-    /// Fetches the token settings; any failure means "routes unavailable" (a web
+    /// Fetches the login settings; any failure means "routes unavailable" (a web
     /// deployment) and the gear is simply never rendered — the frontend's behavior.
     fn refresh_settings(&self, cx: &mut Context<Self>) {
         let api = self.api.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.tokio.spawn(async move {
-            let _ = tx.send(api.openf1_token().await.ok());
+            let _ = tx.send(api.openf1_login().await.ok());
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await.ok().flatten();
@@ -206,17 +206,18 @@ impl IntervalApp {
         self.settings.busy = true;
         self.settings.error = None;
         self.settings.probe = None;
-        let token = self.settings.token_input.trim().to_string();
+        let username = self.settings.username_input.trim().to_string();
+        let password = self.settings.password_input.clone();
         let api = self.api.clone();
         let store = std::sync::Arc::clone(&self.store);
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.tokio.spawn(async move {
             let outcome = async {
-                api.save_openf1_token(&token).await?;
-                let settings = api.openf1_token().await.ok();
-                // A newly applied token can change live availability.
+                api.save_openf1_login(&username, &password).await?;
+                let settings = api.openf1_login().await.ok();
+                // A newly applied login can change live availability.
                 store.check_live();
-                let probe = api.test_openf1_token().await.ok();
+                let probe = api.test_openf1_login().await.ok();
                 Ok::<_, interval_desktop_core::api_client::ApiError>((settings, probe))
             }
             .await;
@@ -228,7 +229,8 @@ impl IntervalApp {
                 this.settings.busy = false;
                 match outcome {
                     Ok((settings, probe)) => {
-                        this.settings.token_input.clear();
+                        this.settings.username_input.clear();
+                        this.settings.password_input.clear();
                         if settings.is_some() {
                             this.settings.settings = Some(settings);
                         }
@@ -256,7 +258,7 @@ impl IntervalApp {
         let api = self.api.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.tokio.spawn(async move {
-            let _ = tx.send(api.test_openf1_token().await);
+            let _ = tx.send(api.test_openf1_login().await);
         });
         cx.spawn(async move |this, cx| {
             let Ok(outcome) = rx.await else { return };
@@ -289,8 +291,8 @@ impl IntervalApp {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.tokio.spawn(async move {
             let outcome = async {
-                api.clear_openf1_token().await?;
-                let settings = api.openf1_token().await.ok();
+                api.clear_openf1_login().await?;
+                let settings = api.openf1_login().await.ok();
                 store.check_live();
                 Ok::<_, interval_desktop_core::api_client::ApiError>(settings)
             }
@@ -636,8 +638,8 @@ fn main() {
         }
         let mono_font = resolve_mono_font(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        // Transport keys are scoped so they don't fire while the settings token input
-        // has focus (its node adds `settings_input` to the context stack).
+        // Transport keys are scoped so they don't fire while a settings login input
+        // has focus (those nodes add `settings_input` to the context stack).
         const TRANSPORT_KEYS: Option<&str> = Some("dashboard && !settings_input");
         cx.bind_keys([
             KeyBinding::new("ctrl-q", Quit, None),

@@ -146,6 +146,11 @@ pub fn driver_dots(
     let leader_number = timing_rows.first().map(|row| row.driver.driver_number);
     positions
         .iter()
+        // A retired or parked car has left the race; its last known point on the map is
+        // noise, so the dot goes rather than fading. The timing tower keeps the row.
+        .filter(|position| {
+            !matches!(statuses.get(&position.driver_number), Some(DriverStatus::Out))
+        })
         .map(|position| {
             let driver = drivers.get(&position.driver_number).copied();
             let rank = ranks.get(&position.driver_number).copied();
@@ -688,25 +693,29 @@ mod tests {
     }
 
     #[test]
-    fn marks_out_drivers_as_faded_frozen_dots() {
+    fn removes_out_drivers_from_the_map() {
         let dots = driver_dots(
-            &[TrackPositionSample {
-                quality: TrackPositionQuality::Stale,
-                stale_seconds: Some(18.0),
-                ..position(4, 100.0, 50.0)
-            }],
-            &[DriverSnapshot {
-                status: DriverStatus::Out,
-                ..row(4, "NOR", "FF8000")
-            }],
+            &[
+                TrackPositionSample {
+                    quality: TrackPositionQuality::Stale,
+                    stale_seconds: Some(18.0),
+                    ..position(4, 100.0, 50.0)
+                },
+                position(1, 20.0, 10.0),
+            ],
+            &[
+                DriverSnapshot {
+                    status: DriverStatus::Out,
+                    ..row(4, "NOR", "FF8000")
+                },
+                row(1, "VER", "3671C6"),
+            ],
             Some(&geometry()),
         );
 
-        assert!(dots[0].is_out);
-        assert!(dots[0].is_stale);
-        assert_eq!(dots[0].opacity, 0.38);
-        assert_eq!(dots[0].radius, 1.05);
-        assert_eq!(dots[0].label, "NOR: projected/stale, 18s stale, out");
+        assert_eq!(dots.len(), 1);
+        assert_eq!(dots[0].driver_number, 1);
+        assert!(!dots[0].is_out);
     }
 
     #[test]

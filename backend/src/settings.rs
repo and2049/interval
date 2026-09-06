@@ -6,6 +6,7 @@
 //! backend and an installed desktop app on the same machine share one file, and so a
 //! credential is not stored next to the replay data.
 
+use crate::connectors::openf1_live::{OpenF1Auth, OpenF1Login};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs;
@@ -18,77 +19,62 @@ const FILE_NAME: &str = "settings.json";
 ///
 /// Deliberately tolerant: unknown keys are ignored so a file written by a newer build
 /// still loads, and absent keys fall back to `None` so an older file still loads.
+///
+/// The OpenF1 login is stored as the account's username and password rather than a
+/// token: OpenF1 issues one-hour tokens, so a saved token would be dead by the next
+/// session. The file is owner-only, but this is still a plaintext password on disk.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub openf1_token: Option<String>,
+    pub openf1_username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openf1_password: Option<String>,
 }
 
-/// Where the effective OpenF1 token came from.
+impl Settings {
+    /// The saved login, or `None` unless both halves are present and non-blank.
+    pub fn openf1_login(&self) -> Option<OpenF1Login> {
+        Some(OpenF1Login {
+            username: non_blank(self.openf1_username.clone())?,
+            password: non_blank(self.openf1_password.clone())?,
+        })
+    }
+}
+
+/// Where the effective OpenF1 credentials came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenSource {
+pub enum AuthSource {
     Settings,
     Env,
     None,
 }
 
-impl TokenSource {
+impl AuthSource {
     pub fn as_str(self) -> &'static str {
         match self {
-            TokenSource::Settings => "settings",
-            TokenSource::Env => "env",
-            TokenSource::None => "none",
+            AuthSource::Settings => "settings",
+            AuthSource::Env => "env",
+            AuthSource::None => "none",
         }
     }
 }
 
-/// A token saved through the settings UI wins over `INTERVAL_OPENF1_LIVE_TOKEN`.
+/// A login saved through the settings UI wins over `INTERVAL_OPENF1_LIVE_TOKEN`.
 ///
 /// The environment value is the one the user cannot reach from the UI, so if it won,
-/// saving a token would silently do nothing on any machine that has a `.env`.
-pub fn resolve_openf1_token(
-    file: Option<String>,
-    env: Option<String>,
-) -> (Option<String>, TokenSource) {
-    match non_blank(file) {
-        Some(token) => (Some(token), TokenSource::Settings),
-        None => match non_blank(env) {
-            Some(token) => (Some(token), TokenSource::Env),
-            None => (None, TokenSource::None),
+/// saving a login would silently do nothing on any machine that has a `.env`.
+pub fn resolve_openf1_auth(settings: &Settings, env_token: Option<String>) -> (OpenF1Auth, AuthSource) {
+    match settings.openf1_login() {
+        Some(login) => (OpenF1Auth::Login(login), AuthSource::Settings),
+        None => match non_blank(env_token) {
+            Some(token) => (OpenF1Auth::Token(token), AuthSource::Env),
+            None => (OpenF1Auth::None, AuthSource::None),
         },
     }
 }
 
 fn non_blank(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
-}
-
-/// A display-only fingerprint of a token. Never returns any run of the token longer
-/// than its last four characters, so it is safe to send to a client.
-pub fn token_hint(token: &str) -> String {
-    let visible = strip_bearer(token.trim());
-    let tail: String = visible
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    if visible.chars().count() <= 4 {
-        "••••".to_string()
-    } else {
-        format!("••••{tail}")
-    }
-}
-
-fn strip_bearer(token: &str) -> &str {
-    let prefix = "bearer ";
-    if token.len() >= prefix.len() && token[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        token[prefix.len()..].trim_start()
-    } else {
-        token
-    }
 }
 
 /// Resolve the per-user config directory. Split out from the environment so it can be
@@ -170,7 +156,7 @@ pub fn save_to(path: &Path, settings: &Settings) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("settings path has no parent directory"))?;
     fs::create_dir_all(parent)?;
 
-    // Write-then-rename so a crash mid-write cannot truncate an existing token, and set
+    // Write-then-rename so a crash mid-write cannot truncate an existing login, and set
     // the mode on the temporary file so the credential is never briefly world-readable.
     let temp = path.with_extension("json.tmp");
     fs::write(&temp, serde_json::to_vec_pretty(settings)?)?;
@@ -209,14 +195,15 @@ impl SettingsStore {
     }
 
     /// Load-modify-write, so keys this build does not set are preserved.
-    /// `None` removes the token entirely rather than storing an empty string.
-    pub fn store_token(&self, token: Option<&str>) -> anyhow::Result<()> {
+    /// `None` removes the login entirely rather than storing empty strings.
+    pub fn store_login(&self, login: Option<&OpenF1Login>) -> anyhow::Result<()> {
         let path = self
             .path
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("no writable settings directory for this platform"))?;
         let mut settings = load_from(path);
-        settings.openf1_token = token.map(str::to_string);
+        settings.openf1_username = login.map(|login| login.username.clone());
+        settings.openf1_password = login.map(|login| login.password.clone());
         save_to(path, &settings)
     }
 
@@ -299,60 +286,61 @@ mod tests {
         assert_eq!(settings_dir_from("windows", Some(&os("")), None, None), None);
     }
 
-    #[test]
-    fn resolve_prefers_settings_over_env() {
-        let (token, source) = resolve_openf1_token(
-            Some("from-file".to_string()),
-            Some("from-env".to_string()),
-        );
-        assert_eq!(token.as_deref(), Some("from-file"));
-        assert_eq!(source, TokenSource::Settings);
-    }
-
-    #[test]
-    fn resolve_falls_back_to_env() {
-        let (token, source) = resolve_openf1_token(None, Some("from-env".to_string()));
-        assert_eq!(token.as_deref(), Some("from-env"));
-        assert_eq!(source, TokenSource::Env);
-    }
-
-    #[test]
-    fn resolve_treats_blank_settings_token_as_absent() {
-        let (token, source) =
-            resolve_openf1_token(Some("   ".to_string()), Some("from-env".to_string()));
-        assert_eq!(token.as_deref(), Some("from-env"));
-        assert_eq!(source, TokenSource::Env);
-    }
-
-    #[test]
-    fn resolve_reports_none_when_nothing_is_configured() {
-        let (token, source) = resolve_openf1_token(None, Some("  ".to_string()));
-        assert!(token.is_none());
-        assert_eq!(source, TokenSource::None);
-    }
-
-    #[test]
-    fn token_hint_never_contains_the_token() {
-        for token in [
-            "abcd",
-            "a-very-long-openf1-sponsor-token-value-1234",
-            "Bearer a-very-long-openf1-sponsor-token-value-1234",
-            "ü-multibyte-token-éé",
-        ] {
-            let hint = token_hint(token);
-            assert!(
-                !hint.contains(token),
-                "hint {hint:?} leaked token {token:?}"
-            );
+    fn saved(username: &str, password: &str) -> Settings {
+        Settings {
+            openf1_username: Some(username.to_string()),
+            openf1_password: Some(password.to_string()),
         }
     }
 
     #[test]
-    fn token_hint_shows_only_the_last_four_characters() {
-        assert_eq!(token_hint("abcdefgh"), "••••efgh");
-        assert_eq!(token_hint("Bearer abcdefgh"), "••••efgh");
-        assert_eq!(token_hint("abcd"), "••••");
-        assert_eq!(token_hint("ab"), "••••");
+    fn resolve_prefers_a_saved_login_over_an_env_token() {
+        let (auth, source) =
+            resolve_openf1_auth(&saved("me@example.com", "pw"), Some("from-env".to_string()));
+        assert_eq!(
+            auth,
+            OpenF1Auth::Login(OpenF1Login {
+                username: "me@example.com".to_string(),
+                password: "pw".to_string(),
+            })
+        );
+        assert_eq!(source, AuthSource::Settings);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_env_token() {
+        let (auth, source) = resolve_openf1_auth(&Settings::default(), Some("from-env".to_string()));
+        assert_eq!(auth, OpenF1Auth::Token("from-env".to_string()));
+        assert_eq!(source, AuthSource::Env);
+    }
+
+    #[test]
+    fn resolve_treats_a_half_blank_login_as_absent() {
+        let (auth, source) =
+            resolve_openf1_auth(&saved("me@example.com", "   "), Some("from-env".to_string()));
+        assert_eq!(auth, OpenF1Auth::Token("from-env".to_string()));
+        assert_eq!(source, AuthSource::Env);
+
+        let (auth, _) = resolve_openf1_auth(&saved("", "pw"), None);
+        assert_eq!(auth, OpenF1Auth::None);
+    }
+
+    #[test]
+    fn resolve_reports_none_when_nothing_is_configured() {
+        let (auth, source) = resolve_openf1_auth(&Settings::default(), Some("  ".to_string()));
+        assert_eq!(auth, OpenF1Auth::None);
+        assert_eq!(source, AuthSource::None);
+    }
+
+    #[test]
+    fn login_debug_output_redacts_the_password() {
+        let login = OpenF1Login {
+            username: "me@example.com".to_string(),
+            password: "hunter2".to_string(),
+        };
+        let printed = format!("{login:?}");
+        assert!(printed.contains("me@example.com"));
+        assert!(!printed.contains("hunter2"), "{printed}");
     }
 
     #[test]
@@ -367,40 +355,55 @@ mod tests {
 
         let empty = dir.join("empty.json");
         fs::write(&empty, "{}").unwrap();
-        assert_eq!(load_from(&empty).openf1_token, None);
+        assert_eq!(load_from(&empty).openf1_login(), None);
 
-        // A file written by a newer build with keys this one does not know about.
+        // A file written by a newer build with keys this one does not know about, and
+        // one from the token era: the stale `openf1_token` is ignored, not an error.
         let future = dir.join("future.json");
-        fs::write(&future, r#"{"openf1_token":"abc","future_key":42}"#).unwrap();
-        assert_eq!(load_from(&future).openf1_token.as_deref(), Some("abc"));
+        fs::write(
+            &future,
+            r#"{"openf1_username":"me@example.com","openf1_password":"pw","openf1_token":"old","future_key":42}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_from(&future).openf1_login().map(|login| login.username),
+            Some("me@example.com".to_string())
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn store_token_round_trips_and_clearing_removes_the_key() {
+    fn store_login_round_trips_and_clearing_removes_the_keys() {
         let dir = temp_dir();
         let path = dir.join("settings.json");
         let store = SettingsStore::at(path.clone());
+        let login = OpenF1Login {
+            username: "me@example.com".to_string(),
+            password: "a-password".to_string(),
+        };
 
-        store.store_token(Some("a-token")).unwrap();
-        assert_eq!(store.load().openf1_token.as_deref(), Some("a-token"));
+        store.store_login(Some(&login)).unwrap();
+        assert_eq!(store.load().openf1_login(), Some(login));
 
-        store.store_token(None).unwrap();
-        assert_eq!(store.load().openf1_token, None);
-        // Assert on the bytes: a cleared token must be absent, not serialized as null.
+        store.store_login(None).unwrap();
+        assert_eq!(store.load().openf1_login(), None);
+        // Assert on the bytes: a cleared login must be absent, not serialized as null.
         let raw = fs::read_to_string(&path).unwrap();
-        assert!(!raw.contains("openf1_token"), "unexpected file body: {raw}");
+        assert!(!raw.contains("openf1_"), "unexpected file body: {raw}");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn store_token_creates_missing_directories() {
+    fn store_login_creates_missing_directories() {
         let dir = temp_dir();
         let path = dir.join("nested").join("deeper").join("settings.json");
         SettingsStore::at(path.clone())
-            .store_token(Some("token"))
+            .store_login(Some(&OpenF1Login {
+                username: "me@example.com".to_string(),
+                password: "pw".to_string(),
+            }))
             .unwrap();
         assert!(path.is_file());
 

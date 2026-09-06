@@ -90,14 +90,14 @@ impl AppState {
 pub fn settings_router(state: AppState) -> Router {
     Router::new()
         .route(
-            "/api/settings/openf1-token",
-            get(settings::get_token)
-                .put(settings::put_token)
-                .delete(settings::delete_token),
+            "/api/settings/openf1-login",
+            get(settings::get_login)
+                .put(settings::put_login)
+                .delete(settings::delete_login),
         )
         .route(
-            "/api/settings/openf1-token/test",
-            post(settings::test_token),
+            "/api/settings/openf1-login/test",
+            post(settings::test_login),
         )
         .with_state(state)
 }

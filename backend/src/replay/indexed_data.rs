@@ -9,10 +9,20 @@ use crate::{
         SessionResult,
     },
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const PIT_WINDOW_SECONDS: f64 = 45.0;
 const LOCATION_INTERPOLATION_MAX_GAP_SECONDS: f64 = 2.0;
+// Live retirement inference. OpenF1 publishes no retirement flag mid-session (the
+// session_result rows only appear once it ends), but a retired car is unmistakable in
+// the location feed: its samples either stop, or keep coming from one fixed point in
+// the garage while everyone else covers kilometres. A driver who has not moved this
+// long is treated as out. The field guard below stops that misfiring when the whole
+// grid is parked, on the grid before a start or in the pit lane under a red flag.
+const STOPPED_WINDOW_SECONDS: f64 = 90.0;
+/// Location units are roughly a tenth of a metre; a parked car reports the exact same
+/// point, a crawling pit-lane car moves hundreds of units in a few seconds.
+const STOPPED_MOVEMENT_THRESHOLD: f64 = 30.0;
 const SNAPSHOT_RACE_CONTROL_LIMIT: usize = 12;
 
 pub(crate) struct ReplayDataIndex<'a> {
@@ -110,6 +120,7 @@ impl<'a> ReplayDataIndex<'a> {
 
     pub(crate) fn timing_rows(&self, t: f64) -> Vec<DriverSnapshot> {
         let (bests_by_driver, overall_bests) = best_times(&self.data.laps, t);
+        let stopped = self.stopped_drivers(t);
         let mut rows = self
             .data
             .drivers
@@ -154,7 +165,13 @@ impl<'a> ReplayDataIndex<'a> {
                     }),
                     sectors: sectors_for(lap_record, driver_bests, &overall_bests),
                     in_pit,
-                    status: driver_status(in_pit, result, latest_location, t),
+                    status: driver_status(
+                        in_pit,
+                        result,
+                        latest_location,
+                        stopped.contains(&driver.driver_number),
+                        t,
+                    ),
                 }
             })
             .collect::<Vec<_>>();
@@ -237,14 +254,12 @@ impl<'a> ReplayDataIndex<'a> {
     }
 
     pub(crate) fn track_status(&self, t: f64) -> String {
-        self.race_control
-            .iter()
-            .copied()
-            .take_while(|event| event.t <= t)
-            .filter(|event| event.flag.is_some())
-            .max_by(|a, b| a.t.total_cmp(&b.t))
-            .and_then(|event| event.flag.clone())
-            .unwrap_or_else(|| "green".to_string())
+        super::track_status::track_status(
+            self.race_control
+                .iter()
+                .copied()
+                .take_while(|event| event.t <= t),
+        )
     }
 
     pub(crate) fn race_control_history(&self, t: f64) -> Vec<RaceControlMessage> {
@@ -355,6 +370,44 @@ impl<'a> ReplayDataIndex<'a> {
             }),
             (None, None) => None,
         }
+    }
+
+    /// Drivers whose car has not moved in the last `STOPPED_WINDOW_SECONDS` before `t`,
+    /// judged from their location samples, provided at least half of the drivers with
+    /// location history did move in that window. When most of the field is stationary
+    /// nobody is reported: that is a grid, a red flag, or a feed outage, not a retirement.
+    fn stopped_drivers(&self, t: f64) -> HashSet<i32> {
+        let window_start = t - STOPPED_WINDOW_SECONDS;
+        let mut stopped = HashSet::new();
+        let mut moved = 0usize;
+        let mut considered = 0usize;
+        for (driver_number, rows) in &self.locations {
+            // Only drivers with a full window of history can be judged.
+            if rows.first().is_none_or(|first| first.t > window_start) {
+                continue;
+            }
+            considered += 1;
+            let from = rows.partition_point(|sample| sample.t < window_start);
+            let to = rows.partition_point(|sample| sample.t <= t);
+            let recent = &rows[from..to];
+            let has_moved = match recent.split_first() {
+                // No samples for the whole window: the feed stopped with the car.
+                None => false,
+                Some((first, rest)) => rest.iter().any(|sample| {
+                    (sample.x - first.x).abs() > STOPPED_MOVEMENT_THRESHOLD
+                        || (sample.y - first.y).abs() > STOPPED_MOVEMENT_THRESHOLD
+                }),
+            };
+            if has_moved {
+                moved += 1;
+            } else {
+                stopped.insert(*driver_number);
+            }
+        }
+        if moved * 2 < considered {
+            return HashSet::new();
+        }
+        stopped
     }
 
     fn latest_location_sample(&self, driver_number: i32, t: f64) -> Option<&'a LocationRecord> {
@@ -514,6 +567,7 @@ fn driver_status(
     in_pit: bool,
     result: Option<&SessionResult>,
     latest_location: Option<&LocationRecord>,
+    stopped: bool,
     t: f64,
 ) -> DriverStatus {
     if in_pit {
@@ -524,6 +578,8 @@ fn driver_status(
         && latest_location
             .is_none_or(|location| t - location.t > LOCATION_INTERPOLATION_MAX_GAP_SECONDS)
     {
+        DriverStatus::Out
+    } else if stopped {
         DriverStatus::Out
     } else {
         DriverStatus::OnTrack
@@ -720,6 +776,108 @@ mod tests {
             crate::domain::TrackPositionQuality::Stale
         );
         assert_eq!(positions[0].stale_seconds, Some(3.0));
+    }
+
+    fn moving_driver(driver_number: i32, until_t: f64) -> Vec<LocationRecord> {
+        // One sample a second, a car length further along each time.
+        (0..=(until_t as i32))
+            .map(|second| location(second as f64, driver_number, second as f64 * 50.0, 0.0, None))
+            .collect()
+    }
+
+    fn parked_driver(driver_number: i32, until_t: f64) -> Vec<LocationRecord> {
+        (0..=(until_t as i32))
+            .map(|second| location(second as f64, driver_number, -1337.0, -1950.0, None))
+            .collect()
+    }
+
+    fn race_data_with_field(drivers: &[i32], locations: Vec<LocationRecord>) -> RaceData {
+        let mut data = race_data_with_locations(locations, vec![]);
+        data.drivers = drivers
+            .iter()
+            .map(|number| crate::domain::Driver {
+                driver_number: *number,
+                code: format!("D{number}"),
+                full_name: format!("Driver {number}"),
+                team_name: "Team".to_string(),
+                team_colour: "FF8000".to_string(),
+            })
+            .collect();
+        data
+    }
+
+    fn status_of(rows: &[DriverSnapshot], driver_number: i32) -> DriverStatus {
+        rows.iter()
+            .find(|row| row.driver.driver_number == driver_number)
+            .map(|row| row.status.clone())
+            .expect("driver row")
+    }
+
+    #[test]
+    fn a_car_parked_while_the_field_moves_is_out() {
+        let mut locations = moving_driver(1, 200.0);
+        locations.extend(moving_driver(4, 200.0));
+        locations.extend(parked_driver(16, 200.0));
+        let data = race_data_with_field(&[1, 4, 16], locations);
+        let index = ReplayDataIndex::new(&data);
+
+        let rows = index.timing_rows(200.0);
+
+        assert_eq!(status_of(&rows, 16), DriverStatus::Out);
+        assert_eq!(status_of(&rows, 1), DriverStatus::OnTrack);
+        assert_eq!(status_of(&rows, 4), DriverStatus::OnTrack);
+    }
+
+    #[test]
+    fn a_car_whose_location_feed_stopped_while_the_field_moves_is_out() {
+        let mut locations = moving_driver(1, 200.0);
+        locations.extend(moving_driver(4, 200.0));
+        // Crashed at t=40: telemetry gone since.
+        locations.extend(moving_driver(16, 40.0));
+        let data = race_data_with_field(&[1, 4, 16], locations);
+        let index = ReplayDataIndex::new(&data);
+
+        assert_eq!(status_of(&index.timing_rows(100.0), 16), DriverStatus::OnTrack, "not yet 90 s");
+        assert_eq!(status_of(&index.timing_rows(200.0), 16), DriverStatus::Out);
+    }
+
+    #[test]
+    fn a_short_stop_is_not_a_retirement() {
+        let mut locations = moving_driver(1, 200.0);
+        // Driver 4 stands still for 60 s of the 90 s window, then moves again.
+        let mut driver_4 = moving_driver(4, 140.0);
+        driver_4.extend((141..=200).map(|second| location(second as f64, 4, 7_000.0, 0.0, None)));
+        locations.extend(driver_4);
+        let data = race_data_with_field(&[1, 4], locations);
+        let index = ReplayDataIndex::new(&data);
+
+        assert_eq!(status_of(&index.timing_rows(200.0), 4), DriverStatus::OnTrack);
+    }
+
+    #[test]
+    fn a_parked_field_reports_nobody_out() {
+        // Red flag: every car sits in the pit lane. Grid before the start: same picture.
+        let mut locations = parked_driver(1, 200.0);
+        locations.extend(parked_driver(4, 200.0));
+        locations.extend(moving_driver(16, 200.0));
+        let data = race_data_with_field(&[1, 4, 16], locations);
+        let index = ReplayDataIndex::new(&data);
+
+        let rows = index.timing_rows(200.0);
+
+        assert!(rows.iter().all(|row| row.status == DriverStatus::OnTrack), "{rows:?}");
+    }
+
+    #[test]
+    fn drivers_without_a_full_window_of_history_are_not_judged() {
+        let mut locations = moving_driver(1, 200.0);
+        locations.extend(moving_driver(4, 200.0));
+        // Driver 16 only appeared 30 s ago, standing still (say, released from the garage).
+        locations.extend((170..=200).map(|second| location(second as f64, 16, 10.0, 10.0, None)));
+        let data = race_data_with_field(&[1, 4, 16], locations);
+        let index = ReplayDataIndex::new(&data);
+
+        assert_eq!(status_of(&index.timing_rows(200.0), 16), DriverStatus::OnTrack);
     }
 
     fn race_data_with_control(race_control: Vec<RaceControlMessage>) -> RaceData {
