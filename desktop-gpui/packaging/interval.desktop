@@ -1,0 +1,12 @@
+# The basename (interval.desktop), Icon=, and StartupWMClass= must all agree with the
+# app_id the window sets in main.rs ("interval"). Disagree and the launcher entry still
+# looks right while the running window shows a blank icon labelled "Unknown".
+[Desktop Entry]
+Name=interval
+Comment=F1 live timing second screen
+Exec=interval-desktop
+Icon=interval
+Terminal=false
+Type=Application
+Categories=Utility;Sports;
+StartupWMClass=interval
