@@ -124,6 +124,14 @@ impl LiveSimulationRegistry {
             .unwrap_or_else(|| inactive_status(session_key))
     }
 
+    pub async fn speed(&self, session_key: i64) -> Option<f64> {
+        self.sessions
+            .lock()
+            .await
+            .get(&session_key)
+            .map(|simulation| simulation.speed)
+    }
+
     /// Rebases the clock so the current simulation time is continuous across the change.
     /// Returns `None` when no simulation is running for the session.
     pub async fn set_speed(&self, session_key: i64, speed: f64) -> Option<LiveSessionStatus> {
@@ -427,6 +435,19 @@ mod tests {
         assert!(after >= before);
         assert!(after - before < 1.0);
         assert!(registry.set_speed(42, 1.0).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn speed_is_reported_for_running_simulations() {
+        let pool = demo_pool().await;
+        let registry = LiveSimulationRegistry::default();
+        assert_eq!(registry.speed(9839).await, None);
+        let options = StartOptions {
+            speed: Some(4.0),
+            ..StartOptions::default()
+        };
+        registry.start(&pool, 9839, options).await.unwrap();
+        assert_eq!(registry.speed(9839).await, Some(4.0));
     }
 
     #[tokio::test]

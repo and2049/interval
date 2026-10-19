@@ -2014,6 +2014,40 @@ async fn live_simulation_start_accepts_lap_and_speed_and_speed_route_rebases() {
 }
 
 #[tokio::test]
+async fn live_simulation_stream_without_speed_query_keeps_the_current_speed() {
+    let app = seeded_router().await;
+    post_json_body(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/start",
+        json!({ "speed": 4.0 }),
+        StatusCode::OK,
+    )
+    .await;
+
+    let text = get_sse_prefix(app.clone(), "/api/sessions/9839/live-simulation/stream", |body| {
+        body.contains("event: snapshot")
+    })
+    .await;
+    assert!(text.contains("event: metadata"));
+
+    let before = get_json(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/status",
+        StatusCode::OK,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let after = get_json(
+        app,
+        "/api/sessions/9839/live-simulation/status",
+        StatusCode::OK,
+    )
+    .await;
+    let advanced = after["current_t"].as_f64().unwrap() - before["current_t"].as_f64().unwrap();
+    assert!(advanced >= 0.8, "simulation advanced only {advanced}s in 300ms; speed was reset");
+}
+
+#[tokio::test]
 async fn live_simulation_requires_cached_replay() {
     let app = seeded_router().await;
 
