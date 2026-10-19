@@ -155,6 +155,10 @@ pub fn router(state: AppState) -> Router {
             post(live_simulation::start),
         )
         .route(
+            "/api/sessions/{session_key}/live-simulation/speed",
+            post(live_simulation::speed),
+        )
+        .route(
             "/api/sessions/{session_key}/live-simulation/status",
             get(live_simulation::status),
         )

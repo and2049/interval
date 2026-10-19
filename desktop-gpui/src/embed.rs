@@ -10,7 +10,9 @@
 
 use include_dir::{Dir, include_dir};
 use interval_backend::server::{self, BoundServer, ServeOptions};
+use serde::{Deserialize, Serialize};
 use std::future::Future;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 static TRACK_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../backend/assets/tracks");
@@ -191,4 +193,104 @@ pub async fn serve_embedded(
         shutdown,
     )
     .await
+}
+
+/// Where local companion tools (an MCP server, a test harness) find the embedded
+/// backend. The port is ephemeral, so without this file nothing outside the process can
+/// locate it. It holds only the loopback URL plus diagnostics, never a credential, and
+/// the bind stays loopback-only. A crash leaves it behind, so readers must treat it as a
+/// hint and confirm with `GET /healthz`.
+pub const DISCOVERY_FILE: &str = "server.json";
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Discovery {
+    pub url: String,
+    pub pid: u32,
+    pub started_at: String,
+}
+
+pub fn write_discovery(dir: &Path, addr: SocketAddr) -> std::io::Result<()> {
+    let record = Discovery {
+        url: format!("http://{addr}"),
+        pid: std::process::id(),
+        started_at: chrono::Utc::now().to_rfc3339(),
+    };
+    // Stage-and-rename so a reader never sees a half-written file.
+    let staged = dir.join(format!("{DISCOVERY_FILE}.partial"));
+    std::fs::write(&staged, serde_json::to_vec_pretty(&record)?)?;
+    std::fs::rename(staged, dir.join(DISCOVERY_FILE))
+}
+
+/// Removes the file only if this process wrote it, so a newer instance's record is
+/// never deleted by an older one shutting down.
+pub fn remove_discovery(dir: &Path) {
+    let path = dir.join(DISCOVERY_FILE);
+    let owned = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Discovery>(&bytes).ok())
+        .is_some_and(|record| record.pid == std::process::id());
+    if owned {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "interval-discovery-test-{}-{tag}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn read(dir: &Path) -> Discovery {
+        serde_json::from_slice(&std::fs::read(dir.join(DISCOVERY_FILE)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn discovery_round_trips_the_bound_address_and_is_removed_on_shutdown() {
+        let dir = TempDir::new("roundtrip");
+        let addr: SocketAddr = "127.0.0.1:53124".parse().unwrap();
+        write_discovery(&dir.0, addr).unwrap();
+        let record = read(&dir.0);
+        assert_eq!(record.url, "http://127.0.0.1:53124");
+        assert_eq!(record.pid, std::process::id());
+        assert!(chrono::DateTime::parse_from_rfc3339(&record.started_at).is_ok());
+        assert!(!dir.0.join(format!("{DISCOVERY_FILE}.partial")).exists());
+
+        remove_discovery(&dir.0);
+        assert!(!dir.0.join(DISCOVERY_FILE).exists());
+    }
+
+    #[test]
+    fn remove_discovery_leaves_another_instances_record_alone() {
+        let dir = TempDir::new("foreign");
+        let foreign = Discovery {
+            url: "http://127.0.0.1:1".to_string(),
+            pid: std::process::id().wrapping_add(1),
+            started_at: "2026-10-18T00:00:00Z".to_string(),
+        };
+        std::fs::write(
+            dir.0.join(DISCOVERY_FILE),
+            serde_json::to_vec(&foreign).unwrap(),
+        )
+        .unwrap();
+        remove_discovery(&dir.0);
+        assert_eq!(read(&dir.0), foreign);
+    }
 }

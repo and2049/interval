@@ -1,5 +1,9 @@
 use super::{ApiError, AppState};
-use crate::{domain::ReplaySnapshot, replay, storage};
+use crate::{
+    domain::ReplaySnapshot,
+    live_simulation::{self, SimulationError, StartOptions},
+    replay, storage,
+};
 use axum::{
     extract::{Path, Query, State},
     response::sse::{Event, KeepAlive, Sse},
@@ -14,20 +18,51 @@ pub struct LiveSimulationStreamQuery {
     speed: Option<f64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpeedBody {
+    speed: f64,
+}
+
+impl From<SimulationError> for ApiError {
+    fn from(error: SimulationError) -> Self {
+        match error {
+            SimulationError::InvalidRequest(message) => ApiError::BadRequest(message),
+            SimulationError::NotCached => ApiError::NotFound,
+            SimulationError::Storage(error) => ApiError::Storage(error),
+        }
+    }
+}
+
 pub async fn start(
     State(state): State<AppState>,
     Path(session_key): Path<i64>,
+    body: Option<Json<StartOptions>>,
 ) -> Result<Json<crate::domain::LiveSessionStatus>, ApiError> {
     if replay::metadata(&state.pool, session_key).await?.is_none() {
         return Err(ApiError::NotFound);
     }
+    let options = body.map_or_else(StartOptions::default, |Json(options)| options);
     Ok(Json(
         state
             .live_simulation
-            .start(&state.pool, session_key)
-            .await
-            .map_err(ApiError::Storage)?,
+            .start(&state.pool, session_key, options)
+            .await?,
     ))
+}
+
+pub async fn speed(
+    State(state): State<AppState>,
+    Path(session_key): Path<i64>,
+    Json(body): Json<SpeedBody>,
+) -> Result<Json<crate::domain::LiveSessionStatus>, ApiError> {
+    let speed = live_simulation::normalize_speed(body.speed)?;
+    state
+        .live_simulation
+        .set_speed(session_key, speed)
+        .await
+        .map(Json)
+        .ok_or(ApiError::NotFound)
 }
 
 pub async fn status(
@@ -78,7 +113,7 @@ pub async fn stream(
         .speed
         .filter(|value| value.is_finite() && *value > 0.0)
         .unwrap_or(1.0)
-        .clamp(0.25, 1_000.0);
+        .clamp(live_simulation::MIN_SPEED, live_simulation::MAX_SPEED);
     state.live_simulation.set_speed(session_key, speed).await;
     let frame_delay = Duration::from_secs_f64((frame_step / speed).clamp(0.01, 2.0));
     let replay_events = storage::get_replay_events(&state.pool, session_key).await?;

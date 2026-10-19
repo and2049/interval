@@ -631,6 +631,9 @@ fn main() {
         .expect("failed to start embedded backend");
     let base_url = format!("http://{}", bound.addr);
     tracing::info!(%base_url, "embedded backend ready");
+    if let Err(error) = embed::write_discovery(&data_dir, bound.addr) {
+        tracing::warn!(%error, "failed to write backend discovery file");
+    }
 
     tracing::info!("entering gpui run loop");
     application().with_assets(assets::Assets).run(move |cx: &mut App| {
@@ -728,6 +731,7 @@ fn main() {
     // `run()` returned: the last window closed and gpui quit. Drain the server so the
     // sqlite pool closes cleanly, then stop the runtime without waiting on stragglers.
     let _ = shutdown_tx.send(());
+    embed::remove_discovery(&data_dir);
     let _ = runtime.block_on(async {
         tokio::time::timeout(std::time::Duration::from_secs(2), bound.task).await
     });
