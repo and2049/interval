@@ -2,9 +2,48 @@ use crate::{
     domain::{DataSource, EndpointLinks, LiveSessionStatus, ReplayMetadata, ReplaySnapshot},
     replay,
 };
+use serde::Deserialize;
 use sqlx::SqlitePool;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
+
+pub const MIN_SPEED: f64 = 0.25;
+pub const MAX_SPEED: f64 = 1_000.0;
+
+/// Optional start parameters. Absent fields keep the original behavior: start at
+/// `race_start_t` (or `min_t`) at 1x. `start_t` and `start_lap` are mutually exclusive.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartOptions {
+    pub start_t: Option<f64>,
+    pub start_lap: Option<i32>,
+    pub speed: Option<f64>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SimulationError {
+    #[error("{0}")]
+    InvalidRequest(String),
+    #[error("cached replay is required")]
+    NotCached,
+    #[error(transparent)]
+    Storage(#[from] anyhow::Error),
+}
+
+impl From<sqlx::Error> for SimulationError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
+
+pub fn normalize_speed(speed: f64) -> Result<f64, SimulationError> {
+    if !speed.is_finite() || speed <= 0.0 {
+        return Err(SimulationError::InvalidRequest(format!(
+            "speed must be a positive number, got {speed}"
+        )));
+    }
+    Ok(speed.clamp(MIN_SPEED, MAX_SPEED))
+}
 
 #[derive(Clone, Default)]
 pub struct LiveSimulationRegistry {
@@ -26,14 +65,25 @@ impl LiveSimulationRegistry {
         &self,
         pool: &SqlitePool,
         session_key: i64,
-    ) -> anyhow::Result<LiveSessionStatus> {
+        options: StartOptions,
+    ) -> Result<LiveSessionStatus, SimulationError> {
         let metadata = replay::metadata(pool, session_key)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("cached replay metadata is required"))?;
-        let start_t = simulation_start_t(&metadata);
+            .ok_or(SimulationError::NotCached)?;
+        let speed = normalize_speed(options.speed.unwrap_or(1.0))?;
+        let start_t = match (options.start_t, options.start_lap) {
+            (Some(_), Some(_)) => {
+                return Err(SimulationError::InvalidRequest(
+                    "start_t and start_lap are mutually exclusive".to_string(),
+                ));
+            }
+            (Some(t), None) => clamp_start_t(&metadata, t)?,
+            (None, Some(lap)) => lap_start_t(pool, session_key, &metadata, lap).await?,
+            (None, None) => simulation_start_t(&metadata),
+        };
         replay::snapshot_at(pool, session_key, start_t)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("cached replay snapshots are required"))?;
+            .ok_or(SimulationError::NotCached)?;
 
         let simulation = LiveSimulation {
             session_key,
@@ -41,7 +91,7 @@ impl LiveSimulationRegistry {
             started_at: chrono::Utc::now().to_rfc3339(),
             min_t: start_t,
             max_t: metadata.max_t,
-            speed: 1.0,
+            speed,
         };
         let status = simulation.status();
         self.sessions.lock().await.insert(session_key, simulation);
@@ -74,13 +124,16 @@ impl LiveSimulationRegistry {
             .unwrap_or_else(|| inactive_status(session_key))
     }
 
-    pub async fn set_speed(&self, session_key: i64, speed: f64) {
-        if let Some(simulation) = self.sessions.lock().await.get_mut(&session_key) {
-            let current_t = simulation.current_t();
-            simulation.min_t = current_t;
-            simulation.started_instant = Instant::now();
-            simulation.speed = speed.max(0.001);
-        }
+    /// Rebases the clock so the current simulation time is continuous across the change.
+    /// Returns `None` when no simulation is running for the session.
+    pub async fn set_speed(&self, session_key: i64, speed: f64) -> Option<LiveSessionStatus> {
+        let mut sessions = self.sessions.lock().await;
+        let simulation = sessions.get_mut(&session_key)?;
+        let current_t = simulation.current_t();
+        simulation.min_t = current_t;
+        simulation.started_instant = Instant::now();
+        simulation.speed = speed.max(0.001);
+        Some(simulation.status())
     }
 
     pub async fn current_snapshot(
@@ -150,6 +203,54 @@ fn inactive_status(session_key: i64) -> LiveSessionStatus {
     }
 }
 
+fn clamp_start_t(metadata: &ReplayMetadata, t: f64) -> Result<f64, SimulationError> {
+    if !t.is_finite() {
+        return Err(SimulationError::InvalidRequest(format!(
+            "start_t must be a finite number, got {t}"
+        )));
+    }
+    let last_frame = (metadata.max_t - metadata.frame_step_seconds).max(metadata.min_t);
+    Ok(t.clamp(metadata.min_t, last_frame))
+}
+
+/// Earliest persisted frame whose leader lap has reached `lap`, found by bisecting the
+/// frame index so a long replay costs a handful of snapshot reads instead of a full scan.
+async fn lap_start_t(
+    pool: &SqlitePool,
+    session_key: i64,
+    metadata: &ReplayMetadata,
+    lap: i32,
+) -> Result<f64, SimulationError> {
+    if lap < 1 {
+        return Err(SimulationError::InvalidRequest(format!(
+            "start_lap must be at least 1, got {lap}"
+        )));
+    }
+    let step = metadata.frame_step_seconds.max(0.001);
+    let frame_t = |frame: i64| metadata.min_t + frame as f64 * step;
+    let lap_at = |frame: i64| async move {
+        replay::snapshot_at(pool, session_key, frame_t(frame))
+            .await
+            .map(|snapshot| snapshot.map_or(0, |snapshot| snapshot.race_state.lap))
+    };
+    let last = ((metadata.max_t - metadata.min_t) / step).floor().max(0.0) as i64;
+    if lap_at(last).await? < lap {
+        return Err(SimulationError::InvalidRequest(format!(
+            "start_lap {lap} is beyond the cached replay"
+        )));
+    }
+    let (mut lo, mut hi) = (0, last);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if lap_at(mid).await? >= lap {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    Ok(frame_t(lo))
+}
+
 fn simulation_start_t(metadata: &ReplayMetadata) -> f64 {
     if metadata.race_start_t.is_finite()
         && metadata.race_start_t >= metadata.min_t
@@ -173,7 +274,10 @@ mod tests {
         storage::seed_demo_session(&pool).await.unwrap();
         let registry = LiveSimulationRegistry::default();
 
-        let status = registry.start(&pool, 9839).await.unwrap();
+        let status = registry
+            .start(&pool, 9839, StartOptions::default())
+            .await
+            .unwrap();
         let snapshot = registry
             .current_snapshot(&pool, 9839)
             .await
@@ -201,7 +305,10 @@ mod tests {
             .unwrap();
         let registry = LiveSimulationRegistry::default();
 
-        let status = registry.start(&pool, 9839).await.unwrap();
+        let status = registry
+            .start(&pool, 9839, StartOptions::default())
+            .await
+            .unwrap();
         let snapshot = registry
             .current_snapshot(&pool, 9839)
             .await
@@ -210,6 +317,116 @@ mod tests {
 
         assert!(status.current_t.unwrap() >= 60.0);
         assert_eq!(snapshot.cursor.t, 60.0);
+    }
+
+    async fn demo_pool() -> SqlitePool {
+        let pool = storage::connect("sqlite::memory:").await.unwrap();
+        storage::migrate(&pool).await.unwrap();
+        storage::seed_demo_session(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn start_t_is_clamped_to_the_last_persisted_frame() {
+        let pool = demo_pool().await;
+        let registry = LiveSimulationRegistry::default();
+
+        let options = StartOptions {
+            start_t: Some(60.0),
+            ..StartOptions::default()
+        };
+        let status = registry.start(&pool, 9839, options).await.unwrap();
+        assert!(status.current_t.unwrap() >= 60.0);
+
+        let options = StartOptions {
+            start_t: Some(10_000.0),
+            ..StartOptions::default()
+        };
+        let status = registry.start(&pool, 9839, options).await.unwrap();
+        assert!(status.active);
+        assert!(status.current_t.unwrap() >= 120.0);
+
+        let options = StartOptions {
+            start_t: Some(-5.0),
+            ..StartOptions::default()
+        };
+        let status = registry.start(&pool, 9839, options).await.unwrap();
+        assert!(status.current_t.unwrap() >= 0.0);
+        assert!(status.current_t.unwrap() < 1.0);
+    }
+
+    #[tokio::test]
+    async fn start_lap_resolves_the_first_frame_of_that_lap() {
+        let pool = demo_pool().await;
+        let registry = LiveSimulationRegistry::default();
+
+        let options = StartOptions {
+            start_lap: Some(3),
+            ..StartOptions::default()
+        };
+        registry.start(&pool, 9839, options).await.unwrap();
+        let snapshot = registry
+            .current_snapshot(&pool, 9839)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.race_state.lap, 3);
+        assert_eq!(snapshot.cursor.t, 120.0);
+
+        let options = StartOptions {
+            start_lap: Some(99),
+            ..StartOptions::default()
+        };
+        assert!(matches!(
+            registry.start(&pool, 9839, options).await,
+            Err(SimulationError::InvalidRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn start_rejects_conflicting_selectors_and_invalid_speed() {
+        let pool = demo_pool().await;
+        let registry = LiveSimulationRegistry::default();
+
+        let options = StartOptions {
+            start_t: Some(0.0),
+            start_lap: Some(1),
+            speed: None,
+        };
+        assert!(matches!(
+            registry.start(&pool, 9839, options).await,
+            Err(SimulationError::InvalidRequest(_))
+        ));
+
+        let options = StartOptions {
+            speed: Some(0.0),
+            ..StartOptions::default()
+        };
+        assert!(matches!(
+            registry.start(&pool, 9839, options).await,
+            Err(SimulationError::InvalidRequest(_))
+        ));
+        assert!(!registry.status(9839).await.active);
+    }
+
+    #[tokio::test]
+    async fn set_speed_keeps_simulation_time_continuous() {
+        let pool = demo_pool().await;
+        let registry = LiveSimulationRegistry::default();
+        let options = StartOptions {
+            start_t: Some(60.0),
+            speed: Some(4.0),
+            ..StartOptions::default()
+        };
+        registry.start(&pool, 9839, options).await.unwrap();
+
+        let before = registry.status(9839).await.current_t.unwrap();
+        let status = registry.set_speed(9839, 1.0).await.unwrap();
+        let after = status.current_t.unwrap();
+
+        assert!(after >= before);
+        assert!(after - before < 1.0);
+        assert!(registry.set_speed(42, 1.0).await.is_none());
     }
 
     #[tokio::test]

@@ -1945,6 +1945,75 @@ async fn live_simulation_start_status_snapshot_and_stop_use_cached_replay() {
 }
 
 #[tokio::test]
+async fn live_simulation_start_accepts_lap_and_speed_and_speed_route_rebases() {
+    let app = seeded_router().await;
+
+    let start = post_json_body(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/start",
+        json!({ "start_lap": 3, "speed": 4.0 }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(start["active"], true);
+    assert!(start["current_t"].as_f64().unwrap() >= 120.0);
+
+    let snapshot = get_json(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/snapshot",
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(snapshot["race_state"]["lap"], 3);
+
+    let status = post_json_body(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/speed",
+        json!({ "speed": 1.0 }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(status["active"], true);
+    assert!(status["current_t"].as_f64().unwrap() >= 120.0);
+
+    post_json_body(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/speed",
+        json!({ "speed": -1.0 }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    post_json_body(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/start",
+        json!({ "start_t": 0.0, "start_lap": 1 }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    post_json_body(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/start",
+        json!({ "start_lap": 99 }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+
+    post_json(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/stop",
+        StatusCode::OK,
+    )
+    .await;
+    post_json_body(
+        app,
+        "/api/sessions/9839/live-simulation/speed",
+        json!({ "speed": 2.0 }),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn live_simulation_requires_cached_replay() {
     let app = seeded_router().await;
 
@@ -2404,6 +2473,28 @@ async fn mock_empty(
 async fn get_json(app: Router, uri: &str, expected_status: StatusCode) -> Value {
     let response = app
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), expected_status);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn post_json_body(
+    app: Router,
+    uri: &str,
+    body: Value,
+    expected_status: StatusCode,
+) -> Value {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), expected_status);

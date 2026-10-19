@@ -40,6 +40,8 @@ Downloaded sessions, caches, logs, and a user-editable `.env` file live here:
 | macOS | `~/Library/Application Support/interval/data` |
 | Linux | `~/.local/share/interval/data` |
 
+While the app runs, `server.json` in this directory records the embedded backend's loopback address (`url`), process id and start time, so local companion tools can find it. It is removed on exit; a stale copy after a crash fails `GET <url>/healthz`. The backend only ever listens on `127.0.0.1`.
+
 Set `INTERVAL_DESKTOP_DATA_DIR` in your environment to use another directory. For other settings, edit `.env` there and restart the app. Environment variables take precedence over `.env`.
 
 | Variable | Purpose |

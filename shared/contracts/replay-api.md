@@ -219,6 +219,17 @@ The live stream emits the same `metadata`, `snapshot`, `event`, `end`, and `erro
 
 Live simulation starts from `ReplayMetadata.race_start_t` when that value is present and inside replay bounds, so pre-grid and formation-lap time is skipped for normal testing. If `race_start_t` is unavailable, the simulator falls back to `min_t`.
 
+`start` accepts an optional JSON body. Without one, behavior is unchanged.
+
+```json
+{ "start_lap": 30, "speed": 4.0 }
+```
+
+- `start_t` (seconds) or `start_lap` (leader lap, resolved to the first persisted frame of that lap), never both. `start_t` is clamped to the replay bounds; a `start_lap` beyond the cached replay returns `400`.
+- `speed` must be a positive number and is clamped to `[0.25, 1000]`. Default `1.0`.
+
+`POST /api/sessions/{session_key}/live-simulation/speed` with `{ "speed": 2.0 }` changes the speed of a running simulation and returns its status. The clock is rebased so `current_t` is continuous across the change. Returns `404` when no simulation is running and `400` for an invalid speed. Opening `/live-simulation/stream?speed=` still sets the speed as before.
+
 ### OpenF1 Live
 
 OpenF1 live mode is enabled by default. Disable it for offline/dev runs with `INTERVAL_OPENF1_LIVE_ENABLED=false`, `0`, `no`, or `off`. Optional configuration includes `INTERVAL_OPENF1_LIVE_BASE_URL`, `INTERVAL_OPENF1_LIVE_TOKEN`, and `INTERVAL_OPENF1_LIVE_AUTH_HEADER`. With the default `Authorization` header, `INTERVAL_OPENF1_LIVE_TOKEN` accepts either a raw token such as `abc123` or a prefixed value such as `Bearer abc123`.
