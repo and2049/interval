@@ -109,12 +109,21 @@ pub async fn stream(
     }
 
     let frame_step = metadata.frame_step_seconds.max(0.001);
-    let speed = query
+    let requested = query
         .speed
         .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(1.0)
-        .clamp(live_simulation::MIN_SPEED, live_simulation::MAX_SPEED);
-    state.live_simulation.set_speed(session_key, speed).await;
+        .map(|value| value.clamp(live_simulation::MIN_SPEED, live_simulation::MAX_SPEED));
+    let speed = match requested {
+        Some(speed) => {
+            state.live_simulation.set_speed(session_key, speed).await;
+            speed
+        }
+        None => state
+            .live_simulation
+            .speed(session_key)
+            .await
+            .unwrap_or(1.0),
+    };
     let frame_delay = Duration::from_secs_f64((frame_step / speed).clamp(0.01, 2.0));
     let replay_events = storage::get_replay_events(&state.pool, session_key).await?;
     let metadata_event = Event::default()
