@@ -99,6 +99,13 @@ pub fn settings_router(state: AppState) -> Router {
             "/api/settings/openf1-login/test",
             post(settings::test_login),
         )
+        .route(
+            "/api/settings/f1-login",
+            get(settings::get_f1_login)
+                .put(settings::put_f1_login)
+                .delete(settings::delete_f1_login),
+        )
+        .route("/api/settings/f1-login/test", post(settings::test_f1_login))
         .with_state(state)
 }
 

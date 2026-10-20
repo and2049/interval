@@ -216,3 +216,4 @@ The MVP is successful if it:
 4. Replay, live simulation, and OpenF1 live use the same `replay.v1` snapshot/event contract.
 5. The dashboard should stay fan-dense and data-first, with compact tables, timelines, map context, and channel-quality badges.
 6. Real OpenF1 live behavior still needs validation during an active race or sprint window.
+7. Historical ingestion signs in to the user's Formula 1 account (F1 TV subscription) through FastF1 3.9's native password login. The backend hands the login to the exporter only through the child's environment, FastF1 owns sign-in and token refresh, and tokens are held in memory for one exporter run (no token file), so a token is only ever used with the credentials that produced it. Live authenticated ingestion has only been exercised with mocked sign-ins so far.

@@ -46,9 +46,15 @@ pub async fn ingest_session(
     )
     .await?;
 
+    let (f1_login, _) = crate::settings::resolve_f1_auth(
+        &state.settings.load(),
+        crate::settings::f1_login_from_env(),
+    );
     let bundle = match tokio::time::timeout(
         Duration::from_secs(1_000),
-        state.fastf1.fetch_race_bundle(&session, meeting.as_ref()),
+        state
+            .fastf1
+            .fetch_race_bundle(&session, meeting.as_ref(), f1_login),
     )
     .await
     {

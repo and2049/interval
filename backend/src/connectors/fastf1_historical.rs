@@ -1,13 +1,27 @@
+//! Historical replay extraction through FastF1, run as a child Python process.
+//!
+//! FastF1 3.9 requires a Formula 1 account with an F1 TV subscription to download archived
+//! timing data. The account is handed to the exporter only through the child's
+//! environment (`F1_USERNAME`/`F1_PASSWORD`, the variables FastF1's native password
+//! sign-in reads), never on the command line, and the child's stdin is closed so FastF1
+//! can never block on an interactive credential prompt. FastF1 performs the sign-in and
+//! token refresh itself; the exporter swaps its token store for an in-memory one, so a
+//! token lives only for the run that signed in with the credentials it was given and
+//! Interval never reads or writes the user's own FastF1 token file.
+//!
+//! The managed venv's readiness sentinel stores the requirements it was installed from,
+//! so a changed pin reinstalls into the existing venv without touching cached race data.
+
 use crate::{
     connectors::openf1_historical::RawEndpoint,
     domain::{Meeting, Session, SessionType},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     time::Duration,
 };
 use thiserror::Error;
@@ -18,6 +32,44 @@ const DEFAULT_CACHE_DIR: &str = "cache/fastf1";
 const DEFAULT_VENV_DIR: &str = "cache/fastf1-venv";
 const READY_SENTINEL: &str = ".interval-fastf1-ready";
 const STDERR_LOG: &str = "cache/fastf1-stderr.log";
+const F1_USERNAME_ENV: &str = "F1_USERNAME";
+const F1_PASSWORD_ENV: &str = "F1_PASSWORD";
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct F1Login {
+    pub username: String,
+    pub password: String,
+}
+
+impl fmt::Debug for F1Login {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("F1Login")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct F1AuthProbe {
+    pub result: String,
+    pub message: String,
+}
+
+impl F1AuthProbe {
+    pub fn missing() -> Self {
+        Self {
+            result: "missing".to_string(),
+            message: "No Formula 1 account is configured. Enter the email and password of the \
+                      Formula 1 account linked to your F1 TV subscription."
+                .to_string(),
+        }
+    }
+
+    pub fn is_ok(&self) -> bool {
+        self.result == "ok"
+    }
+}
 /// Pinned rather than "latest available": fastf1/numpy/pandas wheels are known-good on
 /// this minor, and uv downloads a managed CPython of exactly this version when the host
 /// has none — so every install runs the same interpreter we tested.
@@ -81,20 +133,13 @@ impl FastF1HistoricalClient {
         &self,
         session: &Session,
         meeting: Option<&Meeting>,
+        login: Option<F1Login>,
     ) -> Result<Vec<RawEndpoint>, FastF1HistoricalError> {
         let config = FastF1SessionConfig::for_session(session, meeting)?;
-        let root = self.root.clone();
-        let python_override = self.python_override.clone();
-        let uv_override = self.uv_override.clone();
-        let bootstrap_python = self.bootstrap_python.clone();
         let timeout = self.timeout;
         let session_key = session.session_key;
 
-        tokio::task::spawn_blocking(move || {
-            let python = match python_override {
-                Some(path) => path,
-                None => ensure_managed_python(&root, uv_override.as_deref(), &bootstrap_python)?,
-            };
+        self.run_blocking(move |python, root| {
             let output_path = root
                 .join("cache")
                 .join("fastf1-bundles")
@@ -102,59 +147,148 @@ impl FastF1HistoricalClient {
             if let Some(parent) = output_path.parent() {
                 fs::create_dir_all(parent)?;
             }
+            let _ = fs::remove_file(&output_path);
 
-            let mut command = Command::new(&python);
-            let warnings = config.warnings.clone();
-            command
-                .current_dir(&root)
-                .arg(SCRIPT_PATH)
-                .arg("--year")
-                .arg(config.year.to_string())
-                .arg("--session")
-                .arg(config.session_code)
-                .arg("--session-key")
-                .arg(session_key.to_string())
-                .arg("--cache-dir")
-                .arg(DEFAULT_CACHE_DIR)
-                .arg("--output")
-                .arg(&output_path)
-                .arg("--resolver-method")
-                .arg(config.resolver_method);
-
-            match config.round {
-                Some(round) => {
-                    command.arg("--round").arg(round.to_string());
-                }
-                None => {
-                    if let Some(event_name) = config.event_name {
-                        command.arg("--event-name").arg(event_name);
-                    }
-                    if let Some(country) = config.country {
-                        command.arg("--country").arg(country);
-                    }
-                    if let Some(location) = config.location {
-                        command.arg("--location").arg(location);
-                    }
-                    if let Some(session_start) = config.session_start {
-                        command.arg("--session-start").arg(session_start);
-                    }
-                }
-            }
-
+            let command = export_command(
+                python,
+                root,
+                &config,
+                session_key,
+                &output_path,
+                login.as_ref(),
+            );
             let output = run_command(command, timeout, &root.join(STDERR_LOG))?;
             if !output.status.success() {
                 return Err(FastF1HistoricalError::CommandFailed {
                     program: python.display().to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                    stderr: failure_message(&output.stderr),
                 });
             }
 
             let payload = fs::read_to_string(output_path)?;
-            bundle_from_export(session_key, &payload, &warnings)
+            bundle_from_export(session_key, &payload, &config.warnings)
+        })
+        .await
+    }
+
+    pub async fn probe_login(
+        &self,
+        login: Option<F1Login>,
+    ) -> Result<F1AuthProbe, FastF1HistoricalError> {
+        let Some(login) = login else {
+            return Ok(F1AuthProbe::missing());
+        };
+        let timeout = self.timeout;
+        self.run_blocking(move |python, root| {
+            let command = auth_check_command(python, root, &login);
+            let output = run_command(command, timeout, &root.join(STDERR_LOG))?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let verdict = stdout
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .and_then(|line| serde_json::from_str::<F1AuthProbe>(line.trim()).ok());
+            verdict.ok_or_else(|| FastF1HistoricalError::CommandFailed {
+                program: python.display().to_string(),
+                stderr: failure_message(&output.stderr),
+            })
+        })
+        .await
+    }
+
+    async fn run_blocking<T, F>(&self, job: F) -> Result<T, FastF1HistoricalError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Path, &Path) -> Result<T, FastF1HistoricalError> + Send + 'static,
+    {
+        let root = self.root.clone();
+        let python_override = self.python_override.clone();
+        let uv_override = self.uv_override.clone();
+        let bootstrap_python = self.bootstrap_python.clone();
+        tokio::task::spawn_blocking(move || {
+            let python = match python_override {
+                Some(path) => path,
+                None => ensure_managed_python(&root, uv_override.as_deref(), &bootstrap_python)?,
+            };
+            job(&python, &root)
         })
         .await
         .map_err(|error| FastF1HistoricalError::Join(error.to_string()))?
     }
+}
+
+fn script_command(python: &Path, root: &Path, login: Option<&F1Login>) -> Command {
+    let mut command = Command::new(python);
+    command
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .arg(SCRIPT_PATH);
+    if let Some(login) = login {
+        command
+            .env(F1_USERNAME_ENV, &login.username)
+            .env(F1_PASSWORD_ENV, &login.password);
+    }
+    command
+}
+
+fn export_command(
+    python: &Path,
+    root: &Path,
+    config: &FastF1SessionConfig,
+    session_key: i64,
+    output_path: &Path,
+    login: Option<&F1Login>,
+) -> Command {
+    let mut command = script_command(python, root, login);
+    command
+        .arg("--year")
+        .arg(config.year.to_string())
+        .arg("--session")
+        .arg(config.session_code)
+        .arg("--session-key")
+        .arg(session_key.to_string())
+        .arg("--cache-dir")
+        .arg(DEFAULT_CACHE_DIR)
+        .arg("--output")
+        .arg(output_path)
+        .arg("--resolver-method")
+        .arg(config.resolver_method);
+
+    match config.round {
+        Some(round) => {
+            command.arg("--round").arg(round.to_string());
+        }
+        None => {
+            if let Some(event_name) = &config.event_name {
+                command.arg("--event-name").arg(event_name);
+            }
+            if let Some(country) = &config.country {
+                command.arg("--country").arg(country);
+            }
+            if let Some(location) = &config.location {
+                command.arg("--location").arg(location);
+            }
+            if let Some(session_start) = &config.session_start {
+                command.arg("--session-start").arg(session_start);
+            }
+        }
+    }
+    command
+}
+
+fn auth_check_command(python: &Path, root: &Path, login: &F1Login) -> Command {
+    let mut command = script_command(python, root, Some(login));
+    command.arg("--auth-check").stdout(Stdio::piped());
+    command
+}
+
+fn failure_message(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    text.lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("error: "))
+        .map(str::to_string)
+        .unwrap_or_else(|| text.trim().to_string())
 }
 
 fn ensure_managed_python(
@@ -165,7 +299,10 @@ fn ensure_managed_python(
     let venv_dir = root.join(DEFAULT_VENV_DIR);
     let python = venv_python(&venv_dir);
     let sentinel = venv_dir.join(READY_SENTINEL);
-    if sentinel.exists() && python.exists() {
+    let requirements = fs::read_to_string(root.join(REQUIREMENTS_PATH))?;
+    if python.exists()
+        && fs::read_to_string(&sentinel).is_ok_and(|installed| installed == requirements)
+    {
         return Ok(python);
     }
     let stderr_log = root.join(STDERR_LOG);
@@ -209,7 +346,7 @@ fn ensure_managed_python(
         });
     }
 
-    fs::write(sentinel, "ready\n")?;
+    fs::write(sentinel, requirements)?;
 
     // Best-effort: uv's wheel cache holds hundreds of MB the venv no longer needs —
     // installed files are hardlinks, so they survive the clean. A failure here only
@@ -461,6 +598,56 @@ pub enum FastF1HistoricalError {
 }
 
 #[cfg(test)]
+pub(crate) fn fake_python(dir: &Path, stdout: &str, stderr: &str, exit_code: i32) -> PathBuf {
+    let (path, body) = if cfg!(windows) {
+        let mut body = String::from("@echo off\r\n");
+        if !stdout.is_empty() {
+            body.push_str(&format!("echo {}\r\n", fake_python_text(stdout)));
+        }
+        if !stderr.is_empty() {
+            body.push_str(&format!("echo {} 1>&2\r\n", fake_python_text(stderr)));
+        }
+        body.push_str(&format!("exit /b {exit_code}\r\n"));
+        (dir.join("fake-python.cmd"), body)
+    } else {
+        let mut body = String::from("#!/bin/sh\n");
+        if !stdout.is_empty() {
+            body.push_str(&format!(
+                "echo \"{}\"\n",
+                fake_python_text(stdout).replace('"', "\\\"")
+            ));
+        }
+        if !stderr.is_empty() {
+            body.push_str(&format!(
+                "echo \"{}\" >&2\n",
+                fake_python_text(stderr).replace('"', "\\\"")
+            ));
+        }
+        body.push_str(&format!("exit {exit_code}\n"));
+        (dir.join("fake-python"), body)
+    };
+    fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+#[cfg(test)]
+fn fake_python_text(template: &str) -> String {
+    let (username, args) = if cfg!(windows) {
+        ("%F1_USERNAME%", "%*")
+    } else {
+        ("$F1_USERNAME", "$*")
+    };
+    template
+        .replace("{username}", username)
+        .replace("{args}", args)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -474,6 +661,205 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         dir
     }
+
+    fn write_requirements(root: &Path, text: &str) {
+        let path = root.join(REQUIREMENTS_PATH);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    fn login() -> F1Login {
+        F1Login {
+            username: "me@example.com".to_string(),
+            password: "s3cret-pass".to_string(),
+        }
+    }
+
+    fn args_of(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn envs_of(command: &Command) -> std::collections::HashMap<String, Option<String>> {
+        command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    fn bahrain_config() -> FastF1SessionConfig {
+        FastF1SessionConfig {
+            year: 2024,
+            round: Some(1),
+            session_code: "R",
+            resolver_method: "curated_override",
+            event_name: None,
+            country: None,
+            location: None,
+            session_start: None,
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn export_command_passes_the_login_only_through_the_environment() {
+        let root = Path::new("/data");
+        let command = export_command(
+            Path::new("/venv/python"),
+            root,
+            &bahrain_config(),
+            9472,
+            &root.join("out.json"),
+            Some(&login()),
+        );
+
+        let args = args_of(&command);
+        assert!(
+            args.iter().all(|arg| !arg.contains("s3cret-pass")),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().all(|arg| !arg.contains("me@example.com")),
+            "{args:?}"
+        );
+        assert!(args.contains(&"--round".to_string()));
+        let envs = envs_of(&command);
+        assert_eq!(envs[F1_USERNAME_ENV], Some("me@example.com".to_string()));
+        assert_eq!(envs[F1_PASSWORD_ENV], Some("s3cret-pass".to_string()));
+    }
+
+    #[test]
+    fn export_command_without_a_login_sets_no_credential_variables() {
+        let root = Path::new("/data");
+        let command = export_command(
+            Path::new("/venv/python"),
+            root,
+            &bahrain_config(),
+            9472,
+            &root.join("out.json"),
+            None,
+        );
+        let envs = envs_of(&command);
+        assert!(!envs.contains_key(F1_USERNAME_ENV));
+        assert!(!envs.contains_key(F1_PASSWORD_ENV));
+    }
+
+    #[test]
+    fn auth_check_command_requests_a_probe_with_the_login_in_the_environment() {
+        let command = auth_check_command(Path::new("/venv/python"), Path::new("/data"), &login());
+        let args = args_of(&command);
+        assert!(args.contains(&"--auth-check".to_string()));
+        assert!(args.iter().all(|arg| !arg.contains("s3cret-pass")));
+        assert_eq!(
+            envs_of(&command)[F1_PASSWORD_ENV],
+            Some("s3cret-pass".to_string())
+        );
+    }
+
+    #[test]
+    fn failure_message_prefers_the_exporters_error_line() {
+        let stderr = b"core INFO Loading data\nTraceback...\nerror: Formula 1 account sign-in failed: nope\n";
+        assert_eq!(
+            failure_message(stderr),
+            "Formula 1 account sign-in failed: nope"
+        );
+        assert_eq!(
+            failure_message(b"  plain traceback tail \n"),
+            "plain traceback tail"
+        );
+    }
+
+    #[test]
+    fn login_debug_output_redacts_the_password() {
+        let printed = format!("{:?}", login());
+        assert!(printed.contains("me@example.com"));
+        assert!(!printed.contains("s3cret-pass"), "{printed}");
+    }
+
+    #[test]
+    fn managed_python_is_trusted_only_when_the_sentinel_matches_the_requirements() {
+        let root = scratch_dir("sentinel");
+        write_requirements(&root, "fastf1==3.9.0a0\n");
+        let venv_dir = root.join(DEFAULT_VENV_DIR);
+        let python = venv_python(&venv_dir);
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::write(&python, "").unwrap();
+        let sentinel = venv_dir.join(READY_SENTINEL);
+
+        fs::write(&sentinel, "ready\n").unwrap();
+        let legacy = ensure_managed_python(&root, None, "interval-missing-bootstrap-python");
+        assert!(
+            legacy.is_err(),
+            "a legacy sentinel must trigger a reinstall"
+        );
+
+        fs::write(&sentinel, "fastf1>=3.5,<4\n").unwrap();
+        let stale = ensure_managed_python(&root, None, "interval-missing-bootstrap-python");
+        assert!(stale.is_err(), "a changed pin must trigger a reinstall");
+
+        fs::write(&sentinel, "fastf1==3.9.0a0\n").unwrap();
+        let current = ensure_managed_python(&root, None, "interval-missing-bootstrap-python");
+        assert_eq!(current.unwrap(), python);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn probe_login_reads_the_exporters_verdict_from_stdout() {
+        let root = scratch_dir("probe-ok");
+        let fake = fake_python(
+            &root,
+            r#"{"result":"ok","message":"user={username} args={args}"}"#,
+            "",
+            0,
+        );
+        let client = FastF1HistoricalClient::for_test(root.clone(), Some(fake));
+
+        let probe = client.probe_login(Some(login())).await.unwrap();
+
+        assert!(probe.is_ok());
+        assert!(
+            probe.message.contains("user=me@example.com"),
+            "{}",
+            probe.message
+        );
+        assert!(probe.message.contains("--auth-check"), "{}", probe.message);
+        assert!(!probe.message.contains("s3cret-pass"), "{}", probe.message);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn probe_login_without_a_login_never_starts_python() {
+        let root = scratch_dir("probe-missing");
+        let client = FastF1HistoricalClient::for_test(
+            root.clone(),
+            Some(PathBuf::from("missing-fastf1-python")),
+        );
+
+        let probe = client.probe_login(None).await.unwrap();
+
+        assert_eq!(probe.result, "missing");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn probe_login_reports_a_broken_exporter_as_a_command_failure() {
+        let root = scratch_dir("probe-broken");
+        let fake = fake_python(&root, "not json", "error: exporter exploded", 1);
+        let client = FastF1HistoricalClient::for_test(root.clone(), Some(fake));
+
+        let error = client.probe_login(Some(login())).await.unwrap_err();
+
+        assert!(error.to_string().contains("exporter exploded"), "{error}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
 
     #[test]
     fn uv_commands_pin_python_and_stay_self_contained() {
@@ -530,12 +916,13 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let root = scratch_dir("uv-bootstrap");
+        write_requirements(&root, "fastf1==3.9.0a0\n");
         // A fake uv: `venv <dir>` materializes the interpreter, `pip install` succeeds.
         // The deliberately-missing bootstrap python proves the uv branch was taken.
         let uv = root.join("uv");
         fs::write(
             &uv,
-            "#!/bin/sh\nif [ \"$1\" = venv ]; then\n  for last; do :; done\n  mkdir -p \"$last/bin\"\n  touch \"$last/bin/python\"\nfi\nexit 0\n",
+            "#!/bin/sh\necho \"$1 $2\" >> \"$(dirname \"$0\")/uv-calls.log\"\nif [ \"$1\" = venv ]; then\n  for last; do :; done\n  mkdir -p \"$last/bin\"\n  touch \"$last/bin/python\"\nfi\nexit 0\n",
         )
         .unwrap();
         fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
@@ -545,7 +932,16 @@ mod tests {
 
         assert_eq!(python, venv_python(&root.join(DEFAULT_VENV_DIR)));
         assert!(python.exists());
-        assert!(root.join(DEFAULT_VENV_DIR).join(READY_SENTINEL).exists());
+        let sentinel = root.join(DEFAULT_VENV_DIR).join(READY_SENTINEL);
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "fastf1==3.9.0a0\n");
+
+        write_requirements(&root, "fastf1==3.9.1\n");
+        ensure_managed_python(&root, Some(&uv), "interval-missing-bootstrap-python").unwrap();
+
+        let calls = fs::read_to_string(root.join("uv-calls.log")).unwrap();
+        assert_eq!(calls.matches("venv --python").count(), 1, "{calls}");
+        assert_eq!(calls.matches("pip install").count(), 2, "{calls}");
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "fastf1==3.9.1\n");
         let _ = fs::remove_dir_all(&root);
     }
 
