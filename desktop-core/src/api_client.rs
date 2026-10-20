@@ -10,7 +10,7 @@ use interval_backend::domain::{
     ReplayMetadata, ReplaySnapshot, Season, SessionReadiness, TrackGeometry,
 };
 
-use crate::settings_panel::{OpenF1LoginProbe, OpenF1LoginSettings};
+use crate::settings_panel::{F1LoginProbe, F1LoginSettings, OpenF1LoginProbe, OpenF1LoginSettings};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -227,22 +227,55 @@ impl ApiClient {
         username: &str,
         password: &str,
     ) -> Result<OpenF1LoginSettings, ApiError> {
+        self.put_login(OPENF1_LOGIN_PATH, username, password).await
+    }
+
+    pub async fn clear_openf1_login(&self) -> Result<OpenF1LoginSettings, ApiError> {
+        self.delete_json(OPENF1_LOGIN_PATH).await
+    }
+
+    pub async fn test_openf1_login(&self) -> Result<OpenF1LoginProbe, ApiError> {
+        self.post_json(&format!("{OPENF1_LOGIN_PATH}/test")).await
+    }
+
+    pub async fn f1_login(&self) -> Result<F1LoginSettings, ApiError> {
+        self.get_json(F1_LOGIN_PATH).await
+    }
+
+    pub async fn save_f1_login(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<F1LoginSettings, ApiError> {
+        self.put_login(F1_LOGIN_PATH, username, password).await
+    }
+
+    pub async fn clear_f1_login(&self) -> Result<F1LoginSettings, ApiError> {
+        self.delete_json(F1_LOGIN_PATH).await
+    }
+
+    pub async fn test_f1_login(&self) -> Result<F1LoginProbe, ApiError> {
+        self.post_json(&format!("{F1_LOGIN_PATH}/test")).await
+    }
+
+    async fn put_login<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<T, ApiError> {
         let response = self
             .http
-            .put(self.url(OPENF1_LOGIN_PATH))
+            .put(self.url(path))
             .json(&serde_json::json!({ "username": username, "password": password }))
             .send()
             .await?;
         decode_json(response).await
     }
 
-    pub async fn clear_openf1_login(&self) -> Result<OpenF1LoginSettings, ApiError> {
-        let response = self.http.delete(self.url(OPENF1_LOGIN_PATH)).send().await?;
+    async fn delete_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        let response = self.http.delete(self.url(path)).send().await?;
         decode_json(response).await
-    }
-
-    pub async fn test_openf1_login(&self) -> Result<OpenF1LoginProbe, ApiError> {
-        self.post_json(&format!("{OPENF1_LOGIN_PATH}/test")).await
     }
 
     /// Open one of the `*_url` endpoints as a byte stream for [`crate::sse::SseParser`].
@@ -260,6 +293,7 @@ impl ApiClient {
 }
 
 const OPENF1_LOGIN_PATH: &str = "/api/settings/openf1-login";
+const F1_LOGIN_PATH: &str = "/api/settings/f1-login";
 
 async fn decode_json<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,

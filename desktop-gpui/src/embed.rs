@@ -278,6 +278,41 @@ mod tests {
     }
 
     #[test]
+    fn changed_fastf1_requirements_drop_only_the_readiness_sentinel() {
+        let dir = TempDir::new("requirements");
+        let sentinel = dir.0.join("cache/fastf1-venv/.interval-fastf1-ready");
+        std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+        std::fs::write(&sentinel, "fastf1>=3.5,<4\n").unwrap();
+        std::fs::write(dir.0.join("cache/fastf1-venv/keep.txt"), "venv contents").unwrap();
+        std::fs::create_dir_all(dir.0.join("scripts")).unwrap();
+        std::fs::write(
+            dir.0.join("scripts/fastf1-requirements.txt"),
+            "fastf1>=3.5,<4\n",
+        )
+        .unwrap();
+
+        prepare_data_dir(&dir.0).unwrap();
+
+        assert!(
+            !sentinel.exists(),
+            "a stale requirements file must invalidate the venv"
+        );
+        assert!(dir.0.join("cache/fastf1-venv/keep.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("scripts/fastf1-requirements.txt")).unwrap(),
+            FASTF1_REQUIREMENTS
+        );
+        assert!(FASTF1_REQUIREMENTS.contains("fastf1==3.9.0a0"));
+
+        std::fs::write(&sentinel, FASTF1_REQUIREMENTS).unwrap();
+        prepare_data_dir(&dir.0).unwrap();
+        assert!(
+            sentinel.exists(),
+            "unchanged requirements must keep the venv ready"
+        );
+    }
+
+    #[test]
     fn remove_discovery_leaves_another_instances_record_alone() {
         let dir = TempDir::new("foreign");
         let foreign = Discovery {

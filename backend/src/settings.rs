@@ -5,15 +5,26 @@
 //! deliberate exception: they live in the per-user config directory so a `cargo run`
 //! backend and an installed desktop app on the same machine share one file, and so a
 //! credential is not stored next to the replay data.
+//!
+//! Two independent logins live here: the OpenF1 account for live data and the Formula 1
+//! account (the one an F1 TV subscription, including one bought through Apple TV, is
+//! linked to) that FastF1 signs in with for historical ingestion. Each is saved and
+//! cleared on its own, a saved login wins over its environment variables, and
+//! `f1_verified_at` records the last time FastF1 actually accepted the F1 login so the
+//! UI can tell "configured" from "known to work".
 
+use crate::connectors::fastf1_historical::F1Login;
 use crate::connectors::openf1_live::{OpenF1Auth, OpenF1Login};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const APP_DIR: &str = "interval";
 const FILE_NAME: &str = "settings.json";
+const F1_USERNAME_ENV: &str = "F1_USERNAME";
+const F1_PASSWORD_ENV: &str = "F1_PASSWORD";
 
 /// Settings as stored on disk.
 ///
@@ -23,12 +34,31 @@ const FILE_NAME: &str = "settings.json";
 /// The OpenF1 login is stored as the account's username and password rather than a
 /// token: OpenF1 issues one-hour tokens, so a saved token would be dead by the next
 /// session. The file is owner-only, but this is still a plaintext password on disk.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openf1_username: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openf1_password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub f1_username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub f1_password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub f1_verified_at: Option<String>,
+}
+
+impl fmt::Debug for Settings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let redacted = |value: &Option<String>| value.as_ref().map(|_| "<redacted>");
+        f.debug_struct("Settings")
+            .field("openf1_username", &self.openf1_username)
+            .field("openf1_password", &redacted(&self.openf1_password))
+            .field("f1_username", &self.f1_username)
+            .field("f1_password", &redacted(&self.f1_password))
+            .field("f1_verified_at", &self.f1_verified_at)
+            .finish()
+    }
 }
 
 impl Settings {
@@ -39,6 +69,30 @@ impl Settings {
             password: non_blank(self.openf1_password.clone())?,
         })
     }
+
+    pub fn f1_login(&self) -> Option<F1Login> {
+        Some(F1Login {
+            username: non_blank(self.f1_username.clone())?,
+            password: non_blank(self.f1_password.clone())?,
+        })
+    }
+}
+
+pub fn resolve_f1_auth(settings: &Settings, env: Option<F1Login>) -> (Option<F1Login>, AuthSource) {
+    match settings.f1_login() {
+        Some(login) => (Some(login), AuthSource::Settings),
+        None => match env {
+            Some(login) => (Some(login), AuthSource::Env),
+            None => (None, AuthSource::None),
+        },
+    }
+}
+
+pub fn f1_login_from_env() -> Option<F1Login> {
+    Some(F1Login {
+        username: non_blank(std::env::var(F1_USERNAME_ENV).ok())?,
+        password: non_blank(std::env::var(F1_PASSWORD_ENV).ok())?,
+    })
 }
 
 /// Where the effective OpenF1 credentials came from.
@@ -197,13 +251,39 @@ impl SettingsStore {
     /// Load-modify-write, so keys this build does not set are preserved.
     /// `None` removes the login entirely rather than storing empty strings.
     pub fn store_login(&self, login: Option<&OpenF1Login>) -> anyhow::Result<()> {
+        self.update(|settings| {
+            settings.openf1_username = login.map(|login| login.username.clone());
+            settings.openf1_password = login.map(|login| login.password.clone());
+        })
+    }
+
+    pub fn store_f1_login(&self, login: Option<&F1Login>) -> anyhow::Result<()> {
+        self.update(|settings| {
+            settings.f1_username = login.map(|login| login.username.clone());
+            settings.f1_password = login.map(|login| login.password.clone());
+            settings.f1_verified_at = None;
+        })
+    }
+
+    pub fn store_f1_verified_at(
+        &self,
+        verified_at: Option<String>,
+        tested: &F1Login,
+    ) -> anyhow::Result<()> {
+        self.update(|settings| {
+            if settings.f1_login().as_ref() == Some(tested) {
+                settings.f1_verified_at = verified_at;
+            }
+        })
+    }
+
+    fn update(&self, apply: impl FnOnce(&mut Settings)) -> anyhow::Result<()> {
         let path = self
             .path
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("no writable settings directory for this platform"))?;
         let mut settings = load_from(path);
-        settings.openf1_username = login.map(|login| login.username.clone());
-        settings.openf1_password = login.map(|login| login.password.clone());
+        apply(&mut settings);
         save_to(path, &settings)
     }
 
@@ -290,7 +370,151 @@ mod tests {
         Settings {
             openf1_username: Some(username.to_string()),
             openf1_password: Some(password.to_string()),
+            ..Settings::default()
         }
+    }
+
+    fn f1_saved(username: &str, password: &str) -> Settings {
+        Settings {
+            f1_username: Some(username.to_string()),
+            f1_password: Some(password.to_string()),
+            ..Settings::default()
+        }
+    }
+
+    fn f1_login(username: &str, password: &str) -> F1Login {
+        F1Login {
+            username: username.to_string(),
+            password: password.to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_f1_prefers_a_saved_login_over_the_environment() {
+        let (login, source) = resolve_f1_auth(
+            &f1_saved("saved@example.com", "pw"),
+            Some(f1_login("env@example.com", "env-pw")),
+        );
+        assert_eq!(login, Some(f1_login("saved@example.com", "pw")));
+        assert_eq!(source, AuthSource::Settings);
+    }
+
+    #[test]
+    fn resolve_f1_falls_back_to_the_environment_and_then_to_nothing() {
+        let (login, source) = resolve_f1_auth(
+            &Settings::default(),
+            Some(f1_login("env@example.com", "env-pw")),
+        );
+        assert_eq!(login, Some(f1_login("env@example.com", "env-pw")));
+        assert_eq!(source, AuthSource::Env);
+
+        let (login, source) = resolve_f1_auth(&f1_saved("me@example.com", "  "), None);
+        assert_eq!(login, None);
+        assert_eq!(source, AuthSource::None);
+    }
+
+    #[test]
+    fn f1_login_round_trips_and_clearing_resets_verification() {
+        let dir = temp_dir();
+        let path = dir.join("settings.json");
+        let store = SettingsStore::at(path.clone());
+
+        let me = f1_login("me@example.com", "pw");
+        store.store_f1_login(Some(&me)).unwrap();
+        store
+            .store_f1_verified_at(Some("2026-10-20T10:00:00Z".to_string()), &me)
+            .unwrap();
+        let loaded = store.load();
+        assert_eq!(loaded.f1_login(), Some(me.clone()));
+        assert_eq!(
+            loaded.f1_verified_at.as_deref(),
+            Some("2026-10-20T10:00:00Z")
+        );
+
+        let other = f1_login("other@example.com", "pw2");
+        store.store_f1_login(Some(&other)).unwrap();
+        assert_eq!(store.load().f1_verified_at, None);
+
+        store
+            .store_f1_verified_at(Some("2026-10-20T10:05:00Z".to_string()), &me)
+            .unwrap();
+        assert_eq!(
+            store.load().f1_verified_at,
+            None,
+            "a probe of stale credentials must not verify the newly saved ones"
+        );
+        store
+            .store_f1_verified_at(Some("2026-10-20T10:06:00Z".to_string()), &other)
+            .unwrap();
+        assert_eq!(
+            store.load().f1_verified_at.as_deref(),
+            Some("2026-10-20T10:06:00Z")
+        );
+        store.store_f1_verified_at(None, &other).unwrap();
+        assert_eq!(store.load().f1_verified_at, None);
+
+        store.store_f1_login(None).unwrap();
+        assert_eq!(store.load().f1_login(), None);
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("f1_"), "unexpected file body: {raw}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn openf1_and_f1_logins_are_stored_independently() {
+        let dir = temp_dir();
+        let store = SettingsStore::at(dir.join("settings.json"));
+        let openf1 = OpenF1Login {
+            username: "live@example.com".to_string(),
+            password: "live-pw".to_string(),
+        };
+
+        let tv = f1_login("tv@example.com", "tv-pw");
+        store.store_login(Some(&openf1)).unwrap();
+        store.store_f1_login(Some(&tv)).unwrap();
+        assert_eq!(store.load().openf1_login(), Some(openf1.clone()));
+        assert_eq!(store.load().f1_login(), Some(tv.clone()));
+
+        store.store_login(None).unwrap();
+        assert_eq!(store.load().openf1_login(), None);
+        assert_eq!(store.load().f1_login(), Some(tv));
+
+        store.store_f1_login(None).unwrap();
+        store.store_login(Some(&openf1)).unwrap();
+        assert_eq!(store.load().f1_login(), None);
+        assert_eq!(store.load().openf1_login(), Some(openf1));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_debug_output_redacts_both_passwords_but_keeps_them_serialized() {
+        let settings = Settings {
+            openf1_username: Some("live@example.com".to_string()),
+            openf1_password: Some("live-secret".to_string()),
+            f1_username: Some("tv@example.com".to_string()),
+            f1_password: Some("tv-secret".to_string()),
+            f1_verified_at: Some("2026-10-20T10:00:00Z".to_string()),
+        };
+        let printed = format!("{settings:?}");
+        assert!(printed.contains("live@example.com") && printed.contains("tv@example.com"));
+        assert!(!printed.contains("live-secret"), "{printed}");
+        assert!(!printed.contains("tv-secret"), "{printed}");
+        let serialized = serde_json::to_string(&settings).unwrap();
+        assert!(serialized.contains("live-secret") && serialized.contains("tv-secret"));
+        assert_eq!(
+            serde_json::from_str::<Settings>(&serialized).unwrap(),
+            settings
+        );
+    }
+
+    #[test]
+    fn f1_login_debug_output_redacts_the_password() {
+        let login = f1_saved("me@example.com", "hunter2").f1_login().unwrap();
+        let printed = format!("{login:?}");
+        assert!(printed.contains("me@example.com"));
+        assert!(!printed.contains("hunter2"), "{printed}");
     }
 
     #[test]

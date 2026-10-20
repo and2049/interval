@@ -2024,9 +2024,11 @@ async fn live_simulation_stream_without_speed_query_keeps_the_current_speed() {
     )
     .await;
 
-    let text = get_sse_prefix(app.clone(), "/api/sessions/9839/live-simulation/stream", |body| {
-        body.contains("event: snapshot")
-    })
+    let text = get_sse_prefix(
+        app.clone(),
+        "/api/sessions/9839/live-simulation/stream",
+        |body| body.contains("event: snapshot"),
+    )
     .await;
     assert!(text.contains("event: metadata"));
 
@@ -2044,7 +2046,10 @@ async fn live_simulation_stream_without_speed_query_keeps_the_current_speed() {
     )
     .await;
     let advanced = after["current_t"].as_f64().unwrap() - before["current_t"].as_f64().unwrap();
-    assert!(advanced >= 0.8, "simulation advanced only {advanced}s in 300ms; speed was reset");
+    assert!(
+        advanced >= 0.8,
+        "simulation advanced only {advanced}s in 300ms; speed was reset"
+    );
 }
 
 #[tokio::test]
@@ -2514,12 +2519,7 @@ async fn get_json(app: Router, uri: &str, expected_status: StatusCode) -> Value 
     serde_json::from_slice(&body).unwrap()
 }
 
-async fn post_json_body(
-    app: Router,
-    uri: &str,
-    body: Value,
-    expected_status: StatusCode,
-) -> Value {
+async fn post_json_body(app: Router, uri: &str, body: Value, expected_status: StatusCode) -> Value {
     let response = app
         .oneshot(
             Request::builder()
@@ -2760,6 +2760,20 @@ fn settings_test_store() -> (crate::settings::SettingsStore, std::path::PathBuf)
 }
 
 async fn settings_app(path: &std::path::Path) -> Router {
+    settings_app_with_fastf1(
+        path,
+        crate::connectors::fastf1_historical::FastF1HistoricalClient::for_test(
+            std::env::current_dir().unwrap(),
+            Some(std::path::PathBuf::from("missing-fastf1-python")),
+        ),
+    )
+    .await
+}
+
+async fn settings_app_with_fastf1(
+    path: &std::path::Path,
+    fastf1: crate::connectors::fastf1_historical::FastF1HistoricalClient,
+) -> Router {
     let pool = storage::connect("sqlite::memory:").await.unwrap();
     storage::migrate(&pool).await.unwrap();
     let live_client = crate::connectors::openf1_live::OpenF1LiveClient::with_config(
@@ -2771,16 +2785,235 @@ async fn settings_app(path: &std::path::Path) -> Router {
             auth_header: "authorization".to_string(),
         },
     );
-    let state = AppState::new_with_live(
+    let mut state = AppState::new_with_live(
         pool,
         crate::connectors::openf1_historical::HistoricalClient::default(),
         live_client,
     )
     .with_settings(crate::settings::SettingsStore::at(path.to_path_buf()));
+    state.fastf1 = fastf1;
     router(state.clone()).merge(settings_router(state))
 }
 
-async fn send(app: Router, method: &str, uri: &str, body: Option<&str>) -> (HttpStatusCode, String) {
+fn fastf1_scratch_root(tag: &str) -> std::path::PathBuf {
+    let root =
+        std::env::temp_dir().join(format!("interval-api-fastf1-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[tokio::test]
+async fn f1_settings_routes_are_absent_unless_they_are_registered() {
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    let app = router(AppState::new(
+        pool,
+        crate::connectors::openf1_historical::HistoricalClient::default(),
+    ));
+
+    for (method, uri) in [
+        ("GET", "/api/settings/f1-login"),
+        ("DELETE", "/api/settings/f1-login"),
+        ("POST", "/api/settings/f1-login/test"),
+    ] {
+        let (status, _) = send(app.clone(), method, uri, None).await;
+        assert_eq!(status, HttpStatusCode::NOT_FOUND, "{method} {uri}");
+    }
+}
+
+#[tokio::test]
+async fn f1_login_is_saved_without_ever_returning_the_password() {
+    let (_store, path) = settings_test_store();
+    let secret = "f1tv-secret-password";
+
+    let (status, saved) = send(
+        settings_app(&path).await,
+        "PUT",
+        "/api/settings/f1-login",
+        Some(&format!(
+            r#"{{"username":" tv@example.com ","password":"{secret}"}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, HttpStatusCode::OK);
+    let (_, fetched) = send(
+        settings_app(&path).await,
+        "GET",
+        "/api/settings/f1-login",
+        None,
+    )
+    .await;
+
+    for body in [&saved, &fetched] {
+        assert!(
+            !body.contains(secret),
+            "password leaked in response: {body}"
+        );
+    }
+    let payload = serde_json::from_str::<Value>(&fetched).unwrap();
+    assert_eq!(payload["configured"], true);
+    assert_eq!(payload["source"], "settings");
+    assert_eq!(payload["username"], "tv@example.com");
+    assert_eq!(payload["verified_at"], Value::Null);
+    assert!(std::fs::read_to_string(&path).unwrap().contains(secret));
+
+    let (_, openf1) = send(
+        settings_app(&path).await,
+        "GET",
+        "/api/settings/openf1-login",
+        None,
+    )
+    .await;
+    let openf1 = serde_json::from_str::<Value>(&openf1).unwrap();
+    assert_eq!(openf1["configured"], false);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn f1_login_rejects_blank_halves() {
+    let (_store, path) = settings_test_store();
+    for body in [
+        r#"{"username":"  ","password":"pw"}"#,
+        r#"{"username":"tv@example.com","password":" "}"#,
+    ] {
+        let (status, _) = send(
+            settings_app(&path).await,
+            "PUT",
+            "/api/settings/f1-login",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::BAD_REQUEST);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn testing_the_f1_login_records_verification_and_clearing_forgets_it() {
+    let (_store, path) = settings_test_store();
+    let root = fastf1_scratch_root("f1-probe");
+    let fake = crate::connectors::fastf1_historical::fake_python(
+        &root,
+        r#"{"result":"ok","message":"Signed in as {username}"}"#,
+        "",
+        0,
+    );
+    let fastf1 = crate::connectors::fastf1_historical::FastF1HistoricalClient::for_test(
+        root.clone(),
+        Some(fake),
+    );
+    send(
+        settings_app_with_fastf1(&path, fastf1.clone()).await,
+        "PUT",
+        "/api/settings/f1-login",
+        Some(r#"{"username":"tv@example.com","password":"pw"}"#),
+    )
+    .await;
+    let (status, body) = send(
+        settings_app_with_fastf1(&path, fastf1.clone()).await,
+        "POST",
+        "/api/settings/f1-login/test",
+        None,
+    )
+    .await;
+    assert_eq!(status, HttpStatusCode::OK);
+    let probe = serde_json::from_str::<Value>(&body).unwrap();
+    assert_eq!(probe["result"], "ok");
+    assert_eq!(probe["message"], "Signed in as tv@example.com");
+
+    let (_, fetched) = send(
+        settings_app_with_fastf1(&path, fastf1.clone()).await,
+        "GET",
+        "/api/settings/f1-login",
+        None,
+    )
+    .await;
+    let fetched = serde_json::from_str::<Value>(&fetched).unwrap();
+    assert!(fetched["verified_at"]
+        .as_str()
+        .is_some_and(|value| value.contains('T')));
+
+    let (status, body) = send(
+        settings_app_with_fastf1(&path, fastf1).await,
+        "DELETE",
+        "/api/settings/f1-login",
+        None,
+    )
+    .await;
+    assert_eq!(status, HttpStatusCode::OK);
+    let payload = serde_json::from_str::<Value>(&body).unwrap();
+    assert_eq!(payload["configured"], false);
+    assert_eq!(payload["source"], "none");
+    assert_eq!(payload["verified_at"], Value::Null);
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn testing_the_f1_login_without_credentials_reports_missing() {
+    let (_store, path) = settings_test_store();
+    let (status, body) = send(
+        settings_app(&path).await,
+        "POST",
+        "/api/settings/f1-login/test",
+        None,
+    )
+    .await;
+    assert_eq!(status, HttpStatusCode::OK);
+    let payload = serde_json::from_str::<Value>(&body).unwrap();
+    assert_eq!(payload["result"], "missing");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn ingest_reports_a_failed_f1_sign_in_as_the_ingest_error() {
+    let pool = storage::connect("sqlite::memory:").await.unwrap();
+    storage::migrate(&pool).await.unwrap();
+    storage::seed_mvp_fixture(&pool).await.unwrap();
+    let root = fastf1_scratch_root("ingest-auth");
+    let fake = crate::connectors::fastf1_historical::fake_python(
+        &root,
+        "",
+        "error: Formula 1 account sign-in failed: Sign-in was rejected. Check username and password.",
+        1,
+    );
+    let historical = crate::connectors::openf1_historical::HistoricalClient::with_base_url(
+        "http://127.0.0.1:1/v1/".parse().unwrap(),
+    );
+    let fastf1 = crate::connectors::fastf1_historical::FastF1HistoricalClient::for_test(
+        root.clone(),
+        Some(fake),
+    );
+    let app = router(AppState::new_with_fastf1(pool.clone(), historical, fastf1));
+
+    let payload = post_json(app, "/api/sessions/9472/ingest", StatusCode::BAD_GATEWAY).await;
+
+    assert_eq!(payload["status"], "failed");
+    let error = payload["error"].as_str().unwrap();
+    assert!(error.contains("Sign-in was rejected"), "{error}");
+    assert!(!error.contains("Traceback"), "{error}");
+    let readiness = storage::list_session_readiness(&pool, 1229)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(readiness.ingest_status, crate::domain::IngestStatus::Failed);
+    assert!(readiness
+        .last_error
+        .as_deref()
+        .is_some_and(|message| message.contains("Sign-in was rejected")));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+async fn send(
+    app: Router,
+    method: &str,
+    uri: &str,
+    body: Option<&str>,
+) -> (HttpStatusCode, String) {
     let request = Request::builder().method(method).uri(uri);
     let request = match body {
         Some(json) => request
@@ -2858,7 +3091,10 @@ async fn saving_a_login_never_returns_the_password() {
     // Assert on the raw bytes, not the parsed value: a future field must not be able to
     // reintroduce a leak without failing this test.
     for body in [&saved, &fetched] {
-        assert!(!body.contains(secret), "password leaked in response: {body}");
+        assert!(
+            !body.contains(secret),
+            "password leaked in response: {body}"
+        );
     }
 
     let payload = serde_json::from_str::<Value>(&fetched).unwrap();
@@ -2906,7 +3142,10 @@ async fn blank_logins_are_rejected() {
 
     for (body, field) in [
         (r#"{"username":"   ","password":"pw"}"#, "username"),
-        (r#"{"username":"me@example.com","password":"   "}"#, "password"),
+        (
+            r#"{"username":"me@example.com","password":"   "}"#,
+            "password",
+        ),
     ] {
         let (status, response) = send(
             settings_app(&path).await,

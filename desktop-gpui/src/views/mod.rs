@@ -15,7 +15,7 @@ mod window_frame;
 
 pub use replay_controls::replay_controls;
 pub use session_selector::session_selector;
-pub use settings_menu::{SettingsUi, settings_menu};
+pub use settings_menu::{Account, SettingsUi, settings_menu};
 pub use side_panels::side_panels;
 pub use stint_timeline::stint_timeline;
 pub use timing_tower::timing_tower;

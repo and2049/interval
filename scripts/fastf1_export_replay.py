@@ -4,13 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import inspect
 import json
 import math
 import os
 import re
 import sys
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 import numpy as np
 import pandas as pd
@@ -20,7 +24,156 @@ try:
 except ModuleNotFoundError:
     fastf1 = None
 
+try:
+    import requests
+except ModuleNotFoundError:
+    requests = None
+
 POSITION_SAMPLE_SECONDS = 0.5
+F1_USERNAME_ENV = "F1_USERNAME"
+F1_PASSWORD_ENV = "F1_PASSWORD"
+SIGN_IN_HINT = (
+    "Sign in with the Formula 1 account linked to your F1 TV subscription in Settings, "
+    f"or set {F1_USERNAME_ENV} and {F1_PASSWORD_ENV}."
+)
+MISSING_CREDENTIALS_MESSAGE = (
+    "No Formula 1 account is configured. Enter the email and password of the Formula 1 "
+    f"account linked to your F1 TV subscription, or set {F1_USERNAME_ENV} and {F1_PASSWORD_ENV}."
+)
+
+
+class ExportError(RuntimeError):
+    pass
+
+
+class SessionTokenStore:
+    def load(self) -> None:
+        return None
+
+    def save(self, token: Any) -> None:
+        return None
+
+    def delete(self) -> None:
+        return None
+
+
+class LivetimingAuthWatch:
+    def __init__(self, hosts: frozenset[str]) -> None:
+        self.hosts = hosts
+        self.rejections: list[tuple[int, str]] = []
+
+    def record(self, response: Any) -> None:
+        if response.status_code in (401, 403) and urlsplit(response.url).netloc in self.hosts:
+            self.rejections.append((response.status_code, response.url))
+
+    def raise_if_rejected(self, authenticated: bool) -> None:
+        if not self.rejections:
+            return
+        status, url = self.rejections[0]
+        hint = (
+            "The signed-in Formula 1 account was not accepted for this data; check that its "
+            "F1 TV subscription is active and try again."
+            if authenticated
+            else f"Historical timing data requires an F1 TV subscription. {SIGN_IN_HINT}"
+        )
+        raise ExportError(f"The F1 archive rejected the request for {url} (HTTP {status}). {hint}")
+
+
+def f1account() -> Any:
+    if fastf1 is None:
+        raise RuntimeError("fastf1 is required for Formula 1 account authentication")
+    return fastf1.internals.f1account
+
+
+def f1_credentials_configured() -> bool:
+    return bool(os.environ.get(F1_USERNAME_ENV)) and bool(os.environ.get(F1_PASSWORD_ENV))
+
+
+def configure_auth() -> None:
+    account = f1account()
+    fastf1.set_auth_method("password")
+    account.token_manager._store = SessionTokenStore()
+    account.token_manager.clear()
+
+
+def archive_hosts(api: Any) -> frozenset[str]:
+    return frozenset(urlsplit(url).netloc for url in (api.base_url, api.base_url_mirror))
+
+
+@contextlib.contextmanager
+def watch_livetiming_auth(cache: Any, hosts: frozenset[str]) -> Iterator[LivetimingAuthWatch]:
+    watch = LivetimingAuthWatch(hosts)
+    original = inspect.getattr_static(cache, "requests_get")
+    requests_get = cache.requests_get
+
+    def observed_get(url: Any, **kwargs: Any) -> Any:
+        response = requests_get(url, **kwargs)
+        watch.record(response)
+        return response
+
+    cache.requests_get = observed_get
+    try:
+        yield watch
+    finally:
+        cache.requests_get = original
+
+
+def preflight_auth() -> bool:
+    configure_auth()
+    if not f1_credentials_configured():
+        return False
+    try:
+        f1account().get_token()
+    except fastf1.exceptions.F1AuthError as exc:
+        raise ExportError(f"Formula 1 account sign-in failed: {exc}") from exc
+    return True
+
+
+def classify_auth_error(exc: Exception) -> str:
+    cause = exc.__cause__
+    if requests is not None and isinstance(cause, requests.RequestException):
+        return "invalid" if isinstance(cause, requests.HTTPError) else "unreachable"
+    message = str(exc).lower()
+    if "subscription" in message:
+        return "no_subscription"
+    if "username and password" in message:
+        return "unauthorized"
+    return "invalid"
+
+
+def auth_check() -> dict[str, str]:
+    configure_auth()
+    if not f1_credentials_configured():
+        return {"result": "missing", "message": MISSING_CREDENTIALS_MESSAGE}
+    try:
+        token = f1account().get_token(force_renew=True, method="password")
+    except fastf1.exceptions.F1AuthError as exc:
+        return {"result": classify_auth_error(exc), "message": str(exc)}
+    try:
+        claims = token.claims
+    except Exception:
+        claims = {}
+    status = claims.get("SubscriptionStatus") or "unknown"
+    product = claims.get("SubscribedProduct") or "F1 TV"
+    return {
+        "result": "ok",
+        "message": f"Signed in to Formula 1. Subscription status: {status} ({product}).",
+    }
+
+
+def require_lap_data(session: Any, authenticated: bool) -> None:
+    try:
+        laps = session.laps
+    except Exception:
+        laps = None
+    if laps is not None and not laps.empty:
+        return
+    hint = (
+        "The session may not be available in the F1 archive yet."
+        if authenticated
+        else f"Historical timing data requires an F1 TV subscription. {SIGN_IN_HINT}"
+    )
+    raise ExportError(f"FastF1 returned no lap timing data for this session. {hint}")
 
 
 def clean_float(value: Any) -> float | None:
@@ -264,22 +417,30 @@ def parse_datetime(value: Any) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def load_session(year: int, round_number: int, session_code: str, cache_dir: str):
+def load_session(
+    year: int,
+    round_number: int,
+    session_code: str,
+    cache_dir: str,
+    authenticated: bool = False,
+):
     if fastf1 is None:
         raise RuntimeError("fastf1 is required to load historical replay sessions")
     os.makedirs(cache_dir, exist_ok=True)
     fastf1.Cache.enable_cache(cache_dir)
     session = fastf1.get_session(year, round_number, session_code)
-    try:
-        session.load(telemetry=True, weather=True, messages=True)
-    except TypeError:
+    with watch_livetiming_auth(fastf1.Cache, archive_hosts(fastf1._api)) as watch:
         try:
-            session.load(telemetry=True, weather=True)
+            session.load(telemetry=True, weather=True, messages=True)
         except TypeError:
             try:
-                session.load(telemetry=True)
+                session.load(telemetry=True, weather=True)
             except TypeError:
-                session.load()
+                try:
+                    session.load(telemetry=True)
+                except TypeError:
+                    session.load()
+    watch.raise_if_rejected(authenticated)
     return session
 
 
@@ -670,13 +831,15 @@ def export_bundle(
     session_start: str | None,
     resolver_method: str,
 ) -> dict[str, Any]:
+    authenticated = preflight_auth()
     resolved_round, resolver = resolve_round(
         year, round_number, event_name, country, location, session_start
     )
     if resolver_method == "curated_override":
         resolver["match_method"] = "curated_override"
         resolver["match_confidence"] = 1.0
-    session = load_session(year, resolved_round, session_code, cache_dir)
+    session = load_session(year, resolved_round, session_code, cache_dir, authenticated)
+    require_lap_data(session, authenticated)
     laps, stints, pits = export_laps_and_stints(session)
     telemetry = export_telemetry(session)
     warnings = resolver.get("warnings", [])
@@ -721,33 +884,53 @@ def export_bundle(
     }
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--year", type=int, required=True)
+    parser.add_argument("--year", type=int)
     parser.add_argument("--round", type=int)
-    parser.add_argument("--session", required=True)
-    parser.add_argument("--session-key", type=int, required=True)
+    parser.add_argument("--session")
+    parser.add_argument("--session-key", type=int)
     parser.add_argument("--event-name")
     parser.add_argument("--country")
     parser.add_argument("--location")
     parser.add_argument("--session-start")
     parser.add_argument("--resolver-method", default="provided_round")
     parser.add_argument("--cache-dir", default="cache/fastf1")
-    parser.add_argument("--output", required=True)
-    args = parser.parse_args()
+    parser.add_argument("--auth-check", action="store_true")
+    parser.add_argument("--output")
+    args = parser.parse_args(argv)
 
-    bundle = export_bundle(
-        args.year,
-        args.round,
-        args.session,
-        args.session_key,
-        args.cache_dir,
-        args.event_name,
-        args.country,
-        args.location,
-        args.session_start,
-        args.resolver_method,
-    )
+    if args.auth_check:
+        result = auth_check()
+        print(json.dumps(result))
+        return 0 if result["result"] == "ok" else 1
+
+    required = {
+        "--year": args.year,
+        "--session": args.session,
+        "--session-key": args.session_key,
+        "--output": args.output,
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        parser.error(f"the following arguments are required: {', '.join(missing)}")
+
+    try:
+        bundle = export_bundle(
+            args.year,
+            args.round,
+            args.session,
+            args.session_key,
+            args.cache_dir,
+            args.event_name,
+            args.country,
+            args.location,
+            args.session_start,
+            args.resolver_method,
+        )
+    except ExportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(bundle, handle, separators=(",", ":"))

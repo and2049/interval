@@ -23,6 +23,23 @@ use gpui::{
     prelude::*, px, size,
 };
 use gpui_platform::application;
+use interval_desktop_core::settings_panel::{
+    F1LoginProbe, F1LoginSettings, OpenF1LoginProbe, OpenF1LoginSettings,
+};
+use views::Account;
+
+enum SettingsOutcome {
+    OpenF1 {
+        settings: Option<OpenF1LoginSettings>,
+        probe: Option<OpenF1LoginProbe>,
+    },
+    F1 {
+        settings: Option<F1LoginSettings>,
+        probe: Option<F1LoginProbe>,
+    },
+}
+
+type SettingsResult = Result<SettingsOutcome, interval_desktop_core::api_client::ApiError>;
 
 actions!(
     interval,
@@ -95,7 +112,7 @@ pub struct IntervalApp {
     pub(crate) map_animation: Option<views::MapAnimation>,
     /// The last snapshot the map rendered, kept to seed the next tween.
     pub(crate) map_last_snapshot: Option<interval_backend::domain::ReplaySnapshot>,
-    /// The OpenF1 account popover's state.
+    /// The account settings popover's state.
     pub(crate) settings: views::SettingsUi,
     /// The settings popover's update control.
     pub(crate) update_state: updates::UpdateState,
@@ -194,130 +211,151 @@ impl IntervalApp {
         let api = self.api.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.tokio.spawn(async move {
-            let _ = tx.send(api.openf1_login().await.ok());
+            let _ = tx.send((api.openf1_login().await.ok(), api.f1_login().await.ok()));
         });
         cx.spawn(async move |this, cx| {
-            let result = rx.await.ok().flatten();
+            let Ok((openf1, f1)) = rx.await else { return };
             let _ = this.update(cx, |this, cx| {
-                this.settings.settings = Some(result);
+                this.settings.settings = Some(openf1);
+                this.settings.f1_settings = f1;
                 cx.notify();
             });
         })
         .detach();
     }
 
-    pub(crate) fn settings_save(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn settings_save(&mut self, account: Account, cx: &mut Context<Self>) {
         if self.settings.busy {
             return;
         }
-        self.settings.busy = true;
-        self.settings.error = None;
-        self.settings.probe = None;
-        let username = self.settings.username_input.trim().to_string();
-        let password = self.settings.password_input.clone();
+        self.settings.begin(account);
+        let inputs = self.settings.account(account);
+        let username = inputs.username_input.trim().to_string();
+        let password = inputs.password_input.clone();
         let api = self.api.clone();
         let store = std::sync::Arc::clone(&self.store);
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.tokio.spawn(async move {
-            let outcome = async {
-                api.save_openf1_login(&username, &password).await?;
-                let settings = api.openf1_login().await.ok();
-                // A newly applied login can change live availability.
-                store.check_live();
-                let probe = api.test_openf1_login().await.ok();
-                Ok::<_, interval_desktop_core::api_client::ApiError>((settings, probe))
-            }
-            .await;
+            let outcome = match account {
+                Account::OpenF1 => {
+                    async {
+                        api.save_openf1_login(&username, &password).await?;
+                        let settings = api.openf1_login().await.ok();
+                        // A newly applied login can change live availability.
+                        store.check_live();
+                        let probe = api.test_openf1_login().await.ok();
+                        Ok(SettingsOutcome::OpenF1 { settings, probe })
+                    }
+                    .await
+                }
+                Account::F1 => {
+                    async {
+                        api.save_f1_login(&username, &password).await?;
+                        let probe = api.test_f1_login().await.ok();
+                        let settings = api.f1_login().await.ok();
+                        Ok(SettingsOutcome::F1 { settings, probe })
+                    }
+                    .await
+                }
+            };
             let _ = tx.send(outcome);
         });
-        cx.spawn(async move |this, cx| {
-            let Ok(outcome) = rx.await else { return };
-            let _ = this.update(cx, |this, cx| {
-                this.settings.busy = false;
-                match outcome {
-                    Ok((settings, probe)) => {
-                        this.settings.username_input.clear();
-                        this.settings.password_input.clear();
-                        if settings.is_some() {
-                            this.settings.settings = Some(settings);
-                        }
-                        this.settings.probe = probe;
-                    }
-                    Err(error) => {
-                        this.settings.error =
-                            Some(interval_desktop_core::settings_panel::save_error_message(
-                                Some(&error.to_string()),
-                            ))
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        self.finish_settings_action(rx, account, true, cx);
     }
 
-    pub(crate) fn settings_test(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn settings_test(&mut self, account: Account, cx: &mut Context<Self>) {
         if self.settings.busy {
             return;
         }
-        self.settings.busy = true;
-        self.settings.error = None;
+        self.settings.begin(account);
         let api = self.api.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.tokio.spawn(async move {
-            let _ = tx.send(api.test_openf1_login().await);
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(outcome) = rx.await else { return };
-            let _ = this.update(cx, |this, cx| {
-                this.settings.busy = false;
-                match outcome {
-                    Ok(probe) => this.settings.probe = Some(probe),
-                    Err(error) => {
-                        this.settings.error =
-                            Some(interval_desktop_core::settings_panel::save_error_message(
-                                Some(&error.to_string()),
-                            ))
-                    }
+            let outcome = match account {
+                Account::OpenF1 => {
+                    api.test_openf1_login()
+                        .await
+                        .map(|probe| SettingsOutcome::OpenF1 {
+                            settings: None,
+                            probe: Some(probe),
+                        })
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+                Account::F1 => {
+                    async {
+                        let probe = api.test_f1_login().await?;
+                        let settings = api.f1_login().await.ok();
+                        Ok(SettingsOutcome::F1 {
+                            settings,
+                            probe: Some(probe),
+                        })
+                    }
+                    .await
+                }
+            };
+            let _ = tx.send(outcome);
+        });
+        self.finish_settings_action(rx, account, false, cx);
     }
 
-    pub(crate) fn settings_clear(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn settings_clear(&mut self, account: Account, cx: &mut Context<Self>) {
         if self.settings.busy {
             return;
         }
-        self.settings.busy = true;
-        self.settings.error = None;
-        self.settings.probe = None;
+        self.settings.begin(account);
         let api = self.api.clone();
         let store = std::sync::Arc::clone(&self.store);
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.tokio.spawn(async move {
-            let outcome = async {
-                api.clear_openf1_login().await?;
-                let settings = api.openf1_login().await.ok();
-                store.check_live();
-                Ok::<_, interval_desktop_core::api_client::ApiError>(settings)
-            }
-            .await;
+            let outcome = match account {
+                Account::OpenF1 => {
+                    async {
+                        api.clear_openf1_login().await?;
+                        let settings = api.openf1_login().await.ok();
+                        store.check_live();
+                        Ok(SettingsOutcome::OpenF1 {
+                            settings,
+                            probe: None,
+                        })
+                    }
+                    .await
+                }
+                Account::F1 => {
+                    async {
+                        api.clear_f1_login().await?;
+                        let settings = api.f1_login().await.ok();
+                        Ok(SettingsOutcome::F1 {
+                            settings,
+                            probe: None,
+                        })
+                    }
+                    .await
+                }
+            };
             let _ = tx.send(outcome);
         });
+        self.finish_settings_action(rx, account, false, cx);
+    }
+
+    fn finish_settings_action(
+        &self,
+        rx: tokio::sync::oneshot::Receiver<SettingsResult>,
+        account: Account,
+        clear_inputs: bool,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
             let Ok(outcome) = rx.await else { return };
             let _ = this.update(cx, |this, cx| {
                 this.settings.busy = false;
                 match outcome {
-                    Ok(settings) => {
-                        if settings.is_some() {
-                            this.settings.settings = Some(settings);
+                    Ok(outcome) => {
+                        if clear_inputs {
+                            this.settings.account_mut(account).clear_inputs();
                         }
+                        this.apply_settings_outcome(outcome);
                     }
                     Err(error) => {
-                        this.settings.error =
+                        this.settings.account_mut(account).error =
                             Some(interval_desktop_core::settings_panel::save_error_message(
                                 Some(&error.to_string()),
                             ))
@@ -327,6 +365,27 @@ impl IntervalApp {
             });
         })
         .detach();
+    }
+
+    fn apply_settings_outcome(&mut self, outcome: SettingsOutcome) {
+        match outcome {
+            SettingsOutcome::OpenF1 { settings, probe } => {
+                if settings.is_some() {
+                    self.settings.settings = Some(settings);
+                }
+                if probe.is_some() {
+                    self.settings.probe = probe;
+                }
+            }
+            SettingsOutcome::F1 { settings, probe } => {
+                if settings.is_some() {
+                    self.settings.f1_settings = settings;
+                }
+                if probe.is_some() {
+                    self.settings.f1_probe = probe;
+                }
+            }
+        }
     }
 
     /// Maps a window x-coordinate onto the seek bar and seeks there.
